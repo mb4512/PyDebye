@@ -52,7 +52,7 @@ where `X` is the number of MPI threads. The spectrum is saved in the `spectrum.o
 
 ## To be implemented
 
-Passing `LAMMPS` file and settings via command line argument.
+Passing `LAMMPS` file and settings via command line argument. Currently the spectral resolution is user-supplied, though it should follow from Nyquist's theorem.
 
 ## Authors
 
