@@ -46,3 +46,9 @@ where `X` is the number of MPI threads. The spectrum is saved in the `spectrum.o
 ## To be implemented
 
 Passing `LAMMPS` file and settings via command line argument.
+
+## Authors
+
+* **Max Boleininger**, [UKAEA](http://www.ccfe.ac.uk/) 
+* **Andrew Warwick**, [UKAEA](http://www.ccfe.ac.uk/) 
+
