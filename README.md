@@ -36,7 +36,7 @@ with an up to date `pip` and `setuptools`.
 
 ## Running the code 
 
-The scripts support serial mode and parallel MPI mode. Parallel mode comes highly recommended systems larger than 100,000 atoms. For example, computing the spectrum for 100,000 atoms takes about 1 minute on a single thread. The computational time scaled as O(N^2) with the number of atoms if no cutoff is used, and scales as O(N) if a cutoff is used. Note that the maximum resolution of the spectrum depends on the cutoff radius via Nyquist's theorem.
+The scripts support serial mode and parallel MPI mode. Parallel mode comes highly recommended for systems larger than 100,000 atoms. For example, computing the spectrum for 100,000 atoms takes about 1 minute on a single thread. The computational time scales as O(N^2) with the number of atoms N if no cutoff is used, and scales as O(N) if a cutoff is used. Note that the maximum resolution of the spectrum depends on the cutoff radius via Nyquist's theorem. In periodic systems, the cutoff cannot be larger than half the smaller box length.
 
 The script is run in serial mode using
 ```
@@ -52,7 +52,7 @@ where `X` is the number of MPI threads. The spectrum is saved in the `spectrum.o
 
 ## To be implemented
 
-Passing `LAMMPS` file and settings via command line argument. Currently the spectral resolution is user-supplied, though it should follow from Nyquist's theorem.
+Passing `LAMMPS` file and settings via command line argument. Currently the spectral resolution is user-supplied, though it should follow from Nyquist's theorem. Currently only completely free boundaries or 3D periodic boundaries are supported, mixed boundaries are to be implemented.
 
 ## Authors
 
