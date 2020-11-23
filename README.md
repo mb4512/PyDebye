@@ -27,6 +27,13 @@ pip install numpy
 pip install etc...
 ```
 
+Note that on some systems, pip fails to install `numba` because of a missing `llvm` dependecy. In some cases, this can be fixed by running:
+```
+pip install llvmlite==0.31.0
+```
+with an up to date `pip` and `setuptools`.
+
+
 ## Running the code 
 
 The scripts support serial mode and parallel MPI mode. Parallel mode comes highly recommended systems larger than 100,000 atoms. For example, computing the spectrum for 100,000 atoms takes about 1 minute on a single thread. The computational time scaled as O(N^2) with the number of atoms if no cutoff is used, and scales as O(N) if a cutoff is used. Note that the maximum resolution of the spectrum depends on the cutoff radius via Nyquist's theorem.
