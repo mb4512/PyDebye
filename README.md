@@ -56,6 +56,6 @@ Passing `LAMMPS` file and settings via command line argument. Currently the spec
 
 ## Authors
 
-* **Max Boleininger**, [UKAEA](http://www.ccfe.ac.uk/) 
-* **Andrew Warwick**, [UKAEA](http://www.ccfe.ac.uk/) 
+* **Max Boleininger**, [UKAEA](http://www.ccfe.ac.uk/), max.boleininger@ukaea.uk
+* **Andrew Warwick**, [UKAEA](http://www.ccfe.ac.uk/) , andrew.warwick@ukaea.uk
 
