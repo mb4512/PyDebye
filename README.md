@@ -1,10 +1,10 @@
 # PyDebye
 
-Tool to compute the Debye-Scherrer line profile for LAMMPS dump and restart files. Supports periodic boundary conditions for orthogonal simulation cells using the minimum image convention. 
+Tool to compute the Debye-Scherrer line profile for LAMMPS dump and restart files, written in Python. Supports periodic boundary conditions for orthogonal simulation cells using the minimum image convention. 
 
 ## Getting Started
 
-git clone https://github.com/mb4512/DebyeScherrer.git
+git clone https://github.com/mb4512/PyDebye.git
 
 ### Prerequisites
 
