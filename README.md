@@ -16,7 +16,6 @@ numpy
 scipy
 numba
 mpi4py
-sklearn
 ```
 
 ### Installing
