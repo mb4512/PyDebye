@@ -54,12 +54,14 @@ class ReadFile:
             self.xyz    = None
             self.box    = None
             self.natoms = None
+            self.ortho  = None
         comm.barrier()
         
         # import data is copied to all other threads
         self.xyz    = comm.bcast(self.xyz, root=0)
         self.box    = comm.bcast(self.box, root=0)
         self.natoms = comm.bcast(self.natoms, root=0)
+        self.ortho  = comm.bcast(self.ortho, root=0)
 
         mpiprint ("Imported %d atoms from %s file: %s" % (self.natoms, self.filetype, self.fpath))
         mpiprint ()

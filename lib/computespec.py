@@ -87,6 +87,10 @@ def jaccumulate_histogram(bins_net, bins_inc):
     return bins_net
 
 
+@jit(nopython=True, cache=True, fastmath=True, nogil=True)
+def jaccumulate_spectrum(binlist, ncont, damping, ri, srange):
+    return np.array([np.sum((binlist-ncont)*damping*np.sin(2*np.pi*_s*ri)/(2*np.pi*_s*ri)) for _s in srange], dtype=np.float64)
+ 
 
 class ComputeSpectrum:
     def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None):
@@ -122,6 +126,9 @@ class ComputeSpectrum:
             rpartition = False
 
         comm.barrier()
+
+        if pbc and not self.readfile.ortho:
+            raise RuntimeError('PBC are currently only supported for orthogonal boxes.')
 
         # define distance function according to pbc and partition specification
         if pbc:
@@ -322,6 +329,7 @@ class ComputeSpectrum:
             ndensity = natoms/np.product(self.readfile.box)
         
         # dampening term to reduce low-s oscillations when using cutoff
+        # this is basically a Lanczos window, see https://en.wikipedia.org/wiki/Window_function
         if damp:
             damping = np.sin(np.pi*ri/self.rcut)/(np.pi*ri/self.rcut)
         else:
@@ -332,10 +340,18 @@ class ComputeSpectrum:
             ncont = natoms * 4*np.pi*ri*ri*self.dr * ndensity
         else:
             ncont = np.zeros(len(self.binlist))
-        
-        spectrum = [np.sum((self.binlist-ncont)*damping*np.sin(2*np.pi*_s*ri)/(2*np.pi*_s*ri)) for _s in srange]
-        spectrum = natoms + 2.*np.r_[spectrum]
     
+        # compile function
+        mpiprint ("Compiling DS spectrum function...")
+        spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[:3])
+        mpiprint ("done.\n")
+        
+        _clock = time.time()
+        spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange)
+        spectrum = natoms + 2.*spectrum
+        _clock = time.time() - _clock
+        mpiprint ("Computed DS spectrum in %.3f seconds." % _clock)
+
         return np.c_[srange, spectrum]
     
     
