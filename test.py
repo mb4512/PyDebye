@@ -38,7 +38,7 @@ def main():
     fpath = 'lammpsfiles/vacanneal_slow_9_1800.relax'
 
     filedat = ReadFile(fpath, filetype="restart")
-    filedat.load()
+    filedat.load(shuffle=True)
 
     cspec = ComputeSpectrum(filedat, rpartition=10., pbc=True, rcut=30.0)
     cspec.build_histogram(dr=0.001)
@@ -54,4 +54,6 @@ if __name__ == "__main__":
     main()
     if mode == 'MPI':
         MPI.Finalize()
+
+
 
