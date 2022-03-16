@@ -1,8 +1,8 @@
 import sys, time
 import numpy as np
-from scipy.spatial import cKDTree
-
 from numba import jit
+
+from scipy.spatial import cKDTree
 
 # template to replace MPI functionality for single threaded use
 class MPI_to_serial():
@@ -31,14 +31,15 @@ def mpiprint(*arg):
     return 0
 
 
-@jit(nopython=True, cache=True)
-def jdisvec(xyz, _r):
+@jit(nopython=True, cache=True, fastmath=True)
+def jdisvec(xyz, _dvec, _r):
     _dr = (xyz-_r).T
-    return np.sqrt(_dr[0]*_dr[0] + _dr[1]*_dr[1] + _dr[2]*_dr[2])
+    _dvec[:len(xyz)] = np.sqrt(_dr[0]*_dr[0] + _dr[1]*_dr[1] + _dr[2]*_dr[2]) 
+    return len(xyz)
 
 
-@jit(nopython=True, cache=True)
-def jdisvec_pbc(xyz, _r, box):
+@jit(nopython=True, cache=True, fastmath=True)
+def jdisvec_pbc(xyz, _dvec, _r, box):
     _dr = (xyz-_r).T
     pbc = .5*box
     
@@ -46,7 +47,45 @@ def jdisvec_pbc(xyz, _r, box):
     _dr[1] = _dr[1] - 2.*pbc[1]*np.trunc(_dr[1]/pbc[1])
     _dr[2] = _dr[2] - 2.*pbc[2]*np.trunc(_dr[2]/pbc[2])
 
-    return np.sqrt(_dr[0]*_dr[0] + _dr[1]*_dr[1] + _dr[2]*_dr[2])
+    _dvec[:len(xyz)] = np.sqrt(_dr[0]*_dr[0] + _dr[1]*_dr[1] + _dr[2]*_dr[2])
+    return len(xyz) 
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def jiterate_histogram(n, _distances, _bins, rcut, dr):
+    for i in range(n):
+        # filter out distances beyond cutoff radius
+        if _distances[i] < rcut:
+            _bins[int(_distances[i]/dr)] += 1
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def jpbc_wrap(xyz, box):
+    '''Wraps xyz coordinates back into periodic box so KDTree with PBC on does not complain.'''
+    for i in range(len(xyz)): 
+        xyz[i] = xyz[i]-box*np.floor(xyz[i]/box)
+
+@jit(nopython=True, cache=True, fastmath=True, nogil=True)
+def jaccumulate_histogram(bins_net, bins_inc):
+    # this actually seems slower than the pure python version
+    n1 = len(bins_net)
+    n2 = len(bins_inc)
+
+    if n1 == 0 and n2 == 0:
+        return bins_net
+    
+    if n1 == 0:
+        bins_net = bins_inc
+        return bins_net
+    
+    if n2 > n1:
+        bins_inc[:n1] += bins_net
+        bins_net = bins_inc 
+    else:
+        bins_net[:n2] += bins_inc 
+
+    return bins_net
+
 
 
 class ComputeSpectrum:
@@ -58,19 +97,32 @@ class ComputeSpectrum:
         if pbc:
             if rcut > .5*np.min(self.readfile.box):
                 rcut = .5*np.min(self.readfile.box)
+ 
+        # if pbc, wrap atoms back into box
+        if pbc:
+            mpiprint ("Rewrapping atoms back into periodic box...")
+            # compile first with small test set, then rewrap all atoms
+            ncomp = min([10,self.readfile.natoms])
+            jpbc_wrap(self.readfile.xyz[:ncomp], self.readfile.box) 
+            jpbc_wrap(self.readfile.xyz, self.readfile.box) 
+
+        comm.barrier()
+        mpiprint ("done.\n")
         
         self.rpartition = rpartition
         self.pbc = pbc
         self.rcut = rcut
         self.binlist = []
-        
+
         # partition xyz coordinates into boxes
         # (this is bothersome to parallelise)
-        if rpartition and pbc:
+        if rpartition and rcut < np.inf:
             self.create_partitions()
-        if rpartition and not pbc and rcut < np.inf:
-            self.create_partitions()
-        
+        else:
+            rpartition = False
+
+        comm.barrier()
+
         # define distance function according to pbc and partition specification
         if pbc:
             if rpartition:
@@ -78,15 +130,32 @@ class ComputeSpectrum:
             else:
                 self.getdistances = self._getdistances_pbc
         else:
-            self.getdistances = self._getdistances
-   
+            if rpartition:
+                self.getdistances = self._getdistances_partitioned
+            else:
+                self.getdistances = self._getdistances
+
+        # bin width for testing/benchmarking
+        dr = 0.001
+
+        # preallocate arrays 
+        _dvec = np.zeros(self.readfile.natoms, dtype=float) 
+        self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+
         # test distance function and report on estimated computing time
         mpiprint ("Compiling distance function...")
-        self.getdistances(self.readfile.xyz[0]) # compile first on all threads
+        n = self.getdistances(_dvec, self.readfile.xyz[0]) 
+        jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+        comm.barrier()
+        mpiprint ("done.\n")
+
         if (me == 0):
             clock = time.time()
-            nsample = min(100, self.readfile.natoms) # evaluate 100 samples
-            [self.getdistances(_x) for _x in self.readfile.xyz[:nsample]]
+            nsample = min(100, self.readfile.natoms) # evaluate 100 atoms 
+
+            for _r in self.readfile.xyz[:nsample]:
+                n = self.getdistances(_dvec, _r) 
+                jiterate_histogram(n, _dvec, self.binlist, self.rcut, dr)
             clock = time.time() - clock
             looptime  = clock/nsample
             totaltime = looptime * self.readfile.natoms/nprocs # total est. runtime in seconds
@@ -95,8 +164,11 @@ class ComputeSpectrum:
             print ("Estimated total runtime:    %.3fs"  % totaltime)
             print ()
 
- 
+            # clear binlist again
+            self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
 
+        comm.barrier() 
+    
     def create_partitions(self):
         mpiprint ("Building partitions in serial.")
         clock = time.time()       
@@ -104,48 +176,58 @@ class ComputeSpectrum:
         xyz = self.readfile.xyz
         box = self.readfile.box
         rpart = self.rpartition
-        
-        partitions=(box/rpart).astype(np.int)
-        partitions[partitions==0] +=1 # keep number of partitions at least at (1,1,1)
+      
+        # define number of partitions, rounding up to have it at (1,1,1) at least 
+        partitions = np.array(box/rpart+1, dtype=int)
 
+        # partition box dimensions
         dpart = box/partitions
         rbuffer = np.max(dpart)
-        xbins = [(i*dpart[0], (i+1)*dpart[0]) for i in range(partitions[0])]
-        ybins = [(i*dpart[1], (i+1)*dpart[1]) for i in range(partitions[1])]
-        zbins = [(i*dpart[2], (i+1)*dpart[2]) for i in range(partitions[2])]
 
         xyz_partitioned = []
         partition_map = []
 
-        for _ix,_xb in enumerate(xbins):
-            _xbool = (xyz[:,0]<_xb[1])*(xyz[:,0]>_xb[0])
+        # get bin representations of atomic positions 
+        partition_ixarray = np.array(xyz/dpart, dtype=int)
 
-            for _iy,_yb in enumerate(ybins):
-                _ybool = (xyz[:,1]<_yb[1])*(xyz[:,1]>_yb[0])
+        # construct string array for ez sorting
+        partition_sarray = np.array(["%dx%dx%d" % tuple(_p) for _p in partition_ixarray])
+       
+        # creates an array of indices, sorted by unique element
+        idx_sort = np.argsort(partition_sarray)
 
-                for _iz,_zb in enumerate(zbins):
-                    _zbool = (xyz[:,2]<_zb[1])*(xyz[:,2]>_zb[0])
+        # sorts records array so all unique elements are together 
+        sorted_records_array = partition_sarray[idx_sort]
 
-                    xyz_partitioned.append(xyz[_xbool*_ybool*_zbool])
-                    partition_map.append([_ix, _iy, _iz])
+        # returns the unique values, the index of the first occurrence of a value, and the count for each element
+        vals, idx_start, count = np.unique(sorted_records_array, return_counts=True, return_index=True)
 
+        # splits the indices into separate arrays
+        res = np.split(idx_sort, idx_start[1:])
+
+        # partition xyz data according to bins
+        xyz_partitioned = [xyz[_r] for _r in res]
+        
+        # reorder bin partitions according to partition_sarray sorting 
+        partition_map = partition_ixarray[idx_sort][idx_start]
+
+        # define partition mid-points for kdtree search
         partition_midpts = (box/partitions)*(np.r_[partition_map]+0.5)
 
         self.rbuffer = rbuffer
         self.xyz_partitioned = xyz_partitioned
-        self.pkdtree = cKDTree(partition_midpts, boxsize=box)
+
+        if self.pbc:
+            self.pkdtree = cKDTree(partition_midpts, boxsize=box)
+        else:
+            self.pkdtree = cKDTree(partition_midpts)
 
         clock = time.time() - clock
-        mpiprint ("Partitioned %d atoms into %d (%dx%dx%d) cells in %.3f seconds.\n" % (
+        mpiprint ("Partitioned %d atoms into %d (%dx%dx%d grid) cells in %.3f seconds.\n" % (
                     self.readfile.natoms, len(self.xyz_partitioned), partitions[0], partitions[1], partitions[2], clock))
 
         return 0
 
-    def iterate_histogram(self, _distances, dr):
-        _ix = np.array(_distances/dr, dtype=np.int)
-        _bins = np.bincount(_ix)
-        return _bins
-       
     def accumulate_histogram(self, _bins):
         n1 = len(self.binlist)
         n2 = len(_bins)
@@ -162,7 +244,6 @@ class ComputeSpectrum:
             self.binlist = _bins
         else:
             self.binlist[:n2] += _bins
-        
  
     def build_histogram(self, dr=0.001):
         if nprocs > 1:
@@ -171,37 +252,59 @@ class ComputeSpectrum:
             mpiprint ("Building histogram in serial.")
 
         clock = time.time()
-
-        # evenly split binning computations over all available threads 
-        self.binlist = []
-        chunk = int(np.ceil(self.readfile.natoms/nprocs))
-        for _i,_r in enumerate(self.readfile.xyz):
-            if me*chunk <= _i < (me+1)*chunk:
-                _distances = self.getdistances(_r)
-                _bins = self.iterate_histogram(_distances, dr)
-                self.accumulate_histogram(_bins)
+        _clock = clock 
         comm.barrier()
 
+        # evenly split binning computations over all available threads 
+        self.binlist = [] 
+        chunk = int(np.ceil(self.readfile.natoms/nprocs))
+
+        #tdis = 0.
+        #tbin = 0.
+
+        # preallocate arrays 
+        _dvec = np.zeros(self.readfile.natoms, dtype=float) 
+        self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+
+        # loop over all atoms in the system and compute pairwise distances
+        i0 = me*chunk
+        ie = min((me+1)*chunk, self.readfile.natoms)
+        for _r in self.readfile.xyz[i0:ie]:
+            n = self.getdistances(_dvec, _r)
+            jiterate_histogram(n, _dvec, self.binlist, self.rcut, dr) 
+        natom = ie-i0
+
+        #print ("\tRank %3d finished binning %d atoms in %.3f (tdis+tbin: %.3f+%.3f) seconds." % (me, natom, time.time()-_clock, tdis, tbin))
+        #sys.stdout.flush()
+        comm.barrier()
+        _clock = time.time() - _clock
+        mpiprint ("Binned all atoms in %.3f seconds." % _clock)
+
         # consolidate the binlists from each thread
+        _clock = time.time()
+        comm.barrier()
         for nc in range(nprocs):
             _bins = comm.bcast(self.binlist, root=nc)
             if me == 0 and nc > 0:
                 self.accumulate_histogram(_bins) 
         comm.barrier()
+        _clock = time.time() - _clock
+        mpiprint ("Consolidated binlists in %.3f seconds.\n" % _clock)
+
 
         self.binlist = comm.bcast(self.binlist, root=0)
         self.dr = dr
-        self.ri = np.r_[[i*dr+.5*dr for i in range(len(self.binlist))]]
+        self.ri = np.r_[[i*dr+.5*dr for i in range(len(self.binlist))]] # real-space bin mid-points
        
         clock = time.time() - clock
         hours = np.floor(clock/3600)
         mins  = np.floor(clock/60 - hours*60)
         secs  = np.floor(clock - mins*60 - hours*3600)
-        comm.barrier()
-
         mpiprint ("Computed %d interatomic distances in %.3fs (%dh %dm %ds).\n" % (np.sum(self.binlist), clock, hours, mins, secs))
+        comm.barrier()
+        return 0
 
- 
+
     def build_debyescherrer(self, smin, smax, ns, damp=False, ccorrection=False, nrho=None):
         
         # abort if bins have not been computed
@@ -236,18 +339,24 @@ class ComputeSpectrum:
         return np.c_[srange, spectrum]
     
     
-    def _getdistances(self, _r):
-        _distances = jdisvec(self.readfile.xyz, _r)
-        return _distances[_distances<self.rcut]
+    def _getdistances(self, _dvec, _r):
+        n = jdisvec(self.readfile.xyz, _dvec, _r)
+        return n 
     
-    def _getdistances_pbc(self, _r):
-        _distances = jdisvec_pbc(self.readfile.xyz, _r, self.readfile.box)
-        return _distances[_distances<self.rcut]
+    def _getdistances_pbc(self, _dvec, _r):
+        n = jdisvec_pbc(self.readfile.xyz, _dvec, _r, self.readfile.box)
+        return n 
 
-    def _getdistances_pbc_partitioned(self, _r):
+    def _getdistances_pbc_partitioned(self, _dvec, _r):
         pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
         cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
-        
-        _distances = jdisvec_pbc(cnebs, _r, self.readfile.box)
-        return _distances[_distances<self.rcut]
+        n = jdisvec_pbc(cnebs, _dvec, _r, self.readfile.box)
+        return n 
+
+    def _getdistances_partitioned(self, _dvec, _r):
+        pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
+        cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
+        n = jdisvec(cnebs, _dvec, _r)
+        return n 
+
 
