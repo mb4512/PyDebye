@@ -8,7 +8,7 @@ git clone https://github.com/mb4512/PyDebye.git
 
 ### Prerequisites
 
-This project was written and tested only with Python 3.5.2
+This project was written and tested with Python 3.8.2
 
 Required libraries:
 ```
