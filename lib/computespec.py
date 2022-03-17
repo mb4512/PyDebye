@@ -352,10 +352,17 @@ class ComputeSpectrum:
         _clock = time.time()
         chunk = int(np.ceil(ns/nprocs))
 
-        i0 = me*chunk
-        ie = min((me+1)*chunk, self.readfile.natoms)
+        # build list of local spectrum array sizes 
+        sendcounts = []
+        for _proc_id in range(nprocs):
+            i0 = _proc_id*chunk
+            ie = min((_proc_id+1)*chunk, ns)
+            sendcounts += [ie-i0]
 
         # compute spectrum in each thread 
+        i0 = me*chunk
+        ie = min((me+1)*chunk, ns)
+
         _ns = ie-i0
         _spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[i0:ie])
         comm.barrier()
@@ -365,8 +372,9 @@ class ComputeSpectrum:
             spectrum = np.zeros(ns, dtype=np.float64) 
         else:
             spectrum = None
+        comm.barrier()
 
-        comm.Gather([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], root=0)
+        comm.Gatherv(sendbuf=_spectrum, recvbuf=(spectrum, sendcounts), root=0)
 
         if (me == 0):
             spectrum = natoms + 2.*spectrum
