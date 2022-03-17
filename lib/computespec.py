@@ -313,12 +313,7 @@ class ComputeSpectrum:
         if len(self.binlist) == 0:
             mpiprint ("Empty bin list, no DS spectrum computed.")
             return 0
-
-        if nprocs > 1:
-            mpiprint ("Building histogram in parallel using %d threads." % nprocs) 
-        else:
-            mpiprint ("Building histogram in serial.")
-       
+      
         srange = np.linspace(smin, smax, int(ns))
         ri = self.ri
         natoms = self.readfile.natoms
@@ -347,6 +342,10 @@ class ComputeSpectrum:
         spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[:3])
         mpiprint ("done.\n")
  
+        if nprocs > 1:
+            mpiprint ("Building histogram in parallel using %d threads." % nprocs) 
+        else:
+            mpiprint ("Building histogram in serial.")
         
         # evenly split spectrum computation over all available threads
         _clock = time.time()
