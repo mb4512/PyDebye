@@ -289,17 +289,13 @@ class ComputeSpectrum:
 
         # consolidate the binlists from each thread
         _clock = time.time()
-        comm.barrier()
-        for nc in range(nprocs):
-            _bins = comm.bcast(self.binlist, root=nc)
-            if me == 0 and nc > 0:
-                self.accumulate_histogram(_bins) 
-        comm.barrier()
+        _bins = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+        comm.Allreduce([self.binlist, MPI.INT], [_bins, MPI.INT], op=MPI.SUM)
+        self.binlist = _bins
+
         _clock = time.time() - _clock
         mpiprint ("Consolidated binlists in %.3f seconds.\n" % _clock)
 
-
-        self.binlist = comm.bcast(self.binlist, root=0)
         self.dr = dr
         self.ri = np.r_[[i*dr+.5*dr for i in range(len(self.binlist))]] # real-space bin mid-points
        
@@ -313,11 +309,16 @@ class ComputeSpectrum:
 
 
     def build_debyescherrer(self, smin, smax, ns, damp=False, ccorrection=False, nrho=None):
-        
         # abort if bins have not been computed
         if len(self.binlist) == 0:
+            mpiprint ("Empty bin list, no DS spectrum computed.")
             return 0
-        
+
+        if nprocs > 1:
+            mpiprint ("Building histogram in parallel using %d threads." % nprocs) 
+        else:
+            mpiprint ("Building histogram in serial.")
+       
         srange = np.linspace(smin, smax, int(ns))
         ri = self.ri
         natoms = self.readfile.natoms
@@ -345,14 +346,38 @@ class ComputeSpectrum:
         mpiprint ("Compiling DS spectrum function...")
         spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[:3])
         mpiprint ("done.\n")
+ 
         
+        # evenly split spectrum computation over all available threads
         _clock = time.time()
-        spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange)
-        spectrum = natoms + 2.*spectrum
+        chunk = int(np.ceil(ns/nprocs))
+
+        i0 = me*chunk
+        ie = min((me+1)*chunk, self.readfile.natoms)
+
+        # compute spectrum in each thread 
+        _ns = ie-i0
+        _spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[i0:ie])
+        comm.barrier()
+ 
+        # gather spectrum into main thread 
+        if (me == 0): 
+            spectrum = np.zeros(ns, dtype=np.float64) 
+        else:
+            spectrum = None
+
+        comm.Gather([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], root=0)
+
+        if (me == 0):
+            spectrum = natoms + 2.*spectrum
+            output = np.c_[srange, spectrum]
+        else:
+            output = None
+
         _clock = time.time() - _clock
         mpiprint ("Computed DS spectrum in %.3f seconds." % _clock)
 
-        return np.c_[srange, spectrum]
+        return output 
     
     
     def _getdistances(self, _dvec, _r):
