@@ -65,27 +65,6 @@ def jpbc_wrap(xyz, box):
     for i in range(len(xyz)): 
         xyz[i] = xyz[i]-box*np.floor(xyz[i]/box)
 
-@jit(nopython=True, cache=True, fastmath=True, nogil=True)
-def jaccumulate_histogram(bins_net, bins_inc):
-    # this actually seems slower than the pure python version
-    n1 = len(bins_net)
-    n2 = len(bins_inc)
-
-    if n1 == 0 and n2 == 0:
-        return bins_net
-    
-    if n1 == 0:
-        bins_net = bins_inc
-        return bins_net
-    
-    if n2 > n1:
-        bins_inc[:n1] += bins_net
-        bins_net = bins_inc 
-    else:
-        bins_net[:n2] += bins_inc 
-
-    return bins_net
-
 
 @jit(nopython=True, cache=True, fastmath=True, nogil=True)
 def jaccumulate_spectrum(binlist, ncont, damping, ri, srange):
@@ -93,7 +72,7 @@ def jaccumulate_spectrum(binlist, ncont, damping, ri, srange):
  
 
 class ComputeSpectrum:
-    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None):
+    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None, precision="double"):
         # store reference to readfile instance
         self.readfile = readfile 
         
@@ -117,6 +96,17 @@ class ComputeSpectrum:
         self.pbc = pbc
         self.rcut = rcut
         self.binlist = []
+
+        # change precision if single precision mode is requested 
+        if precision == "single":
+            self.single = True
+            mpiprint ("Computing pairwise distances in single precision mode.\n")
+        else:
+            self.single = False
+            mpiprint ("Computing pairwise distances in double precision mode.\n")
+
+        if self.single:
+            self.readfile.xyz = self.readfile.xyz.astype(np.single)
 
         # partition xyz coordinates into boxes
         # (this is bothersome to parallelise)
@@ -145,9 +135,19 @@ class ComputeSpectrum:
         # bin width for testing/benchmarking
         dr = 0.001
 
-        # preallocate arrays 
-        _dvec = np.zeros(self.readfile.natoms, dtype=float) 
-        self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+        # preallocate arrays
+
+        # define maximum number of bins (upper limit)
+        if pbc:
+            self.nbin = int(self.rcut/dr)+1
+        else:
+            self.nbin = int(1.3*np.linalg.norm(self.readfile.box)/dr)+1
+
+        self.binlist = np.zeros(self.nbin, dtype=int)
+        if self.single:
+            _dvec = np.zeros(self.readfile.natoms, dtype=np.single)
+        else:
+            _dvec = np.zeros(self.readfile.natoms, dtype=np.double)
 
         # test distance function and report on estimated computing time
         mpiprint ("Compiling distance function...")
@@ -172,7 +172,7 @@ class ComputeSpectrum:
             print ()
 
             # clear binlist again
-            self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+            self.binlist = np.zeros(self.nbin, dtype=int)
 
         comm.barrier() 
     
@@ -235,23 +235,7 @@ class ComputeSpectrum:
 
         return 0
 
-    def accumulate_histogram(self, _bins):
-        n1 = len(self.binlist)
-        n2 = len(_bins)
 
-        if n1 == 0 and n2 == 0:
-            return 0
-        
-        if n1 == 0:
-            self.binlist = _bins
-            return 0
-        
-        if n2 > n1:
-            _bins[:n1] += self.binlist
-            self.binlist = _bins
-        else:
-            self.binlist[:n2] += _bins
- 
     def build_histogram(self, dr=0.001):
         if nprocs > 1:
             mpiprint ("Building histogram in parallel using %d threads." % nprocs) 
@@ -270,8 +254,11 @@ class ComputeSpectrum:
         #tbin = 0.
 
         # preallocate arrays 
-        _dvec = np.zeros(self.readfile.natoms, dtype=float) 
-        self.binlist = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+        self.binlist = np.zeros(self.nbin, dtype=int)
+        if self.single:
+            _dvec = np.zeros(self.readfile.natoms, dtype=np.single)
+        else:
+            _dvec = np.zeros(self.readfile.natoms, dtype=np.double)
 
         # loop over all atoms in the system and compute pairwise distances
         i0 = me*chunk
@@ -289,7 +276,7 @@ class ComputeSpectrum:
 
         # consolidate the binlists from each thread
         _clock = time.time()
-        _bins = np.zeros(2*int(np.linalg.norm(self.readfile.box)/dr), dtype=int)
+        _bins = np.zeros(self.nbin, dtype=int)
         comm.Allreduce([self.binlist, MPI.INT], [_bins, MPI.INT], op=MPI.SUM)
         self.binlist = _bins
 
@@ -297,7 +284,7 @@ class ComputeSpectrum:
         mpiprint ("Consolidated binlists in %.3f seconds.\n" % _clock)
 
         self.dr = dr
-        self.ri = np.r_[[i*dr+.5*dr for i in range(len(self.binlist))]] # real-space bin mid-points
+        self.ri = np.r_[[i*dr+.5*dr for i in range(self.nbin)]] # real-space bin mid-points
        
         clock = time.time() - clock
         hours = np.floor(clock/3600)
@@ -310,7 +297,7 @@ class ComputeSpectrum:
 
     def build_debyescherrer(self, smin, smax, ns, damp=False, ccorrection=False, nrho=None):
         # abort if bins have not been computed
-        if len(self.binlist) == 0:
+        if np.sum(self.binlist) == 0:
             mpiprint ("Empty bin list, no DS spectrum computed.")
             return 0
       
@@ -329,13 +316,13 @@ class ComputeSpectrum:
         if damp:
             damping = np.sin(np.pi*ri/self.rcut)/(np.pi*ri/self.rcut)
         else:
-            damping = np.ones(len(self.binlist))
+            damping = np.ones(self.nbin)
             
         # continuum correction for pbc
         if ccorrection:
             ncont = natoms * 4*np.pi*ri*ri*self.dr * ndensity
         else:
-            ncont = np.zeros(len(self.binlist))
+            ncont = np.zeros(self.nbin)
     
         # compile function
         mpiprint ("Compiling DS spectrum function...")
