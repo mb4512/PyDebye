@@ -141,7 +141,7 @@ class ComputeSpectrum:
         if pbc:
             self.nbin = int(self.rcut/dr)+1
         else:
-            self.nbin = int(1.3*np.linalg.norm(self.readfile.box)/dr)+1
+            self.nbin = 2*int(np.linalg.norm(self.readfile.box)/dr)
 
         self.binlist = np.zeros(self.nbin, dtype=int)
         if self.single:
@@ -246,6 +246,12 @@ class ComputeSpectrum:
         _clock = clock 
         comm.barrier()
 
+        # define maximum number of bins (upper limit)
+        if self.pbc:
+            self.nbin = int(self.rcut/dr)+1
+        else:
+            self.nbin = 2*int(np.linalg.norm(self.readfile.box)/dr)
+
         # evenly split binning computations over all available threads 
         self.binlist = [] 
         chunk = int(np.ceil(self.readfile.natoms/nprocs))
@@ -259,6 +265,7 @@ class ComputeSpectrum:
             _dvec = np.zeros(self.readfile.natoms, dtype=np.single)
         else:
             _dvec = np.zeros(self.readfile.natoms, dtype=np.double)
+        comm.barrier()
 
         # loop over all atoms in the system and compute pairwise distances
         i0 = me*chunk
