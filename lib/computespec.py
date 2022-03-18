@@ -343,18 +343,18 @@ class ComputeSpectrum:
         
         # evenly split spectrum computation over all available threads
         _clock = time.time()
-        chunk = int(np.ceil(ns/nprocs))
+        chunk = ns/nprocs
 
         # build list of local spectrum array sizes 
         sendcounts = []
         for _proc_id in range(nprocs):
-            i0 = _proc_id*chunk
-            ie = min((_proc_id+1)*chunk, ns)
+            i0 = int(np.round(_proc_id*chunk))
+            ie = min(int(np.round((_proc_id+1)*chunk)), ns)
             sendcounts += [ie-i0]
 
         # compute spectrum in each thread 
-        i0 = me*chunk
-        ie = min((me+1)*chunk, ns)
+        i0 = int(np.round(me*chunk))
+        ie = min(int(np.round((me+1)*chunk)), ns)
 
         _ns = ie-i0
         _spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[i0:ie])
