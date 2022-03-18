@@ -30,6 +30,8 @@ def mpiprint(*arg):
         sys.stdout.flush()
     return 0
 
+# global blocking size (in number of elements) used throughout this code
+BSIZE = 10000
 
 @jit(nopython=True, cache=True, fastmath=True)
 def jdisvec(xyz, _dvec, _r):
@@ -114,6 +116,7 @@ class ComputeSpectrum:
             self.create_partitions()
         else:
             rpartition = False
+            self.rpartition = False
 
         comm.barrier()
 
@@ -148,18 +151,34 @@ class ComputeSpectrum:
 
         # test distance function and report on estimated computing time
         mpiprint ("Compiling distance function...")
-        n = self.getdistances(_dvec, self.readfile.xyz[0]) 
-        jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+
+        _r =  self.readfile.xyz[0]
+        if rpartition:
+            pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
+            cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
+            n = self.getdistances(cnebs, _dvec, _r) 
+            jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+        else:
+            n = self.getdistances(self.readfile.xyz, _dvec, _r)
+            jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+
         comm.barrier()
         mpiprint ("done.\n")
 
         if (me == 0):
             clock = time.time()
             nsample = min(100, self.readfile.natoms) # evaluate 100 atoms 
-
             for _r in self.readfile.xyz[:nsample]:
-                n = self.getdistances(_dvec, _r) 
-                jiterate_histogram(n, _dvec, self.binlist, self.rcut, dr)
+
+                if rpartition:
+                    pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
+                    cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
+                    n = self.getdistances(cnebs, _dvec, _r) 
+                    jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+                else:
+                    n = self.getdistances(self.readfile.xyz, _dvec, _r)
+                    jiterate_histogram(n, _dvec , self.binlist, self.rcut, dr)
+
             clock = time.time() - clock
             looptime  = clock/nsample
             totaltime = looptime * self.readfile.natoms/nprocs # total est. runtime in seconds
@@ -253,9 +272,6 @@ class ComputeSpectrum:
         self.binlist = [] 
         chunk = int(np.ceil(self.readfile.natoms/nprocs))
 
-        #tdis = 0.
-        #tbin = 0.
-
         # preallocate arrays 
         self.binlist = np.zeros(self.nbin, dtype=int)
         if self.single:
@@ -267,9 +283,24 @@ class ComputeSpectrum:
         # loop over all atoms in the system and compute pairwise distances
         i0 = me*chunk
         ie = min((me+1)*chunk, self.readfile.natoms)
-        for _r in self.readfile.xyz[i0:ie]:
-            n = self.getdistances(_dvec, _r)
-            jiterate_histogram(n, _dvec, self.binlist, self.rcut, dr) 
+
+        if self.rpartition:
+            # if partitions are on, need to find neighbours for a given atom _r first; hence flipped loop order
+            for _r in self.readfile.xyz[i0:ie]:
+                pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
+                cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
+         
+                for bstart in range(0, len(cnebs), BSIZE):
+                    bend = min(bstart+BSIZE, len(cnebs))
+                    n = self.getdistances(cnebs[bstart:bend], _dvec[bstart:bend], _r)
+                    jiterate_histogram(n, _dvec[bstart:bend], self.binlist, self.rcut, dr)
+        else:
+            # without partitions, we know that cache blocks extend to number of atoms in the system
+            for bstart in range(0, self.readfile.natoms, BSIZE):
+                bend = min(bstart+BSIZE, self.readfile.natoms)
+                for _r in self.readfile.xyz[i0:ie]:
+                    n = self.getdistances(self.readfile.xyz[bstart:bend], _dvec[bstart:bend], _r)
+                    jiterate_histogram(n, _dvec[bstart:bend], self.binlist, self.rcut, dr)
         natom = ie-i0
 
         #print ("\tRank %3d finished binning %d atoms in %.3f (tdis+tbin: %.3f+%.3f) seconds." % (me, natom, time.time()-_clock, tdis, tbin))
@@ -345,7 +376,7 @@ class ComputeSpectrum:
         _clock = time.time()
         chunk = ns/nprocs
 
-        # build list of local spectrum array sizes 
+        # build list of local spectrum array sizes
         sendcounts = []
         for _proc_id in range(nprocs):
             i0 = int(np.round(_proc_id*chunk))
@@ -381,24 +412,18 @@ class ComputeSpectrum:
         return output 
     
     
-    def _getdistances(self, _dvec, _r):
-        n = jdisvec(self.readfile.xyz, _dvec, _r)
+    def _getdistances(self, xyz, _dvec, _r):
+        n = jdisvec(xyz, _dvec, _r)
         return n 
     
-    def _getdistances_pbc(self, _dvec, _r):
-        n = jdisvec_pbc(self.readfile.xyz, _dvec, _r, self.readfile.box)
+    def _getdistances_pbc(self, xyz, _dvec, _r):
+        n = jdisvec_pbc(xyz, _dvec, _r, self.readfile.box)
         return n 
 
-    def _getdistances_pbc_partitioned(self, _dvec, _r):
-        pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
-        cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
-        n = jdisvec_pbc(cnebs, _dvec, _r, self.readfile.box)
+    def _getdistances_pbc_partitioned(self, xyz, _dvec, _r):
+        n = jdisvec_pbc(xyz, _dvec, _r, self.readfile.box)
         return n 
 
-    def _getdistances_partitioned(self, _dvec, _r):
-        pindices = self.pkdtree.query_ball_point(_r, self.rcut+self.rbuffer)
-        cnebs = np.concatenate([self.xyz_partitioned[_p] for _p in pindices])
-        n = jdisvec(cnebs, _dvec, _r)
+    def _getdistances_partitioned(self, xyz, _dvec, _r):
+        n = jdisvec(xyz, _dvec, _r)
         return n 
-
-
