@@ -72,7 +72,7 @@ def jaccumulate_spectrum(binlist, ncont, damping, ri, srange):
  
 
 class ComputeSpectrum:
-    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None, precision="double"):
+    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None, precision="double", dr=0.001):
         # store reference to readfile instance
         self.readfile = readfile 
         
@@ -131,9 +131,6 @@ class ComputeSpectrum:
                 self.getdistances = self._getdistances_partitioned
             else:
                 self.getdistances = self._getdistances
-
-        # bin width for testing/benchmarking
-        dr = 0.001
 
         # preallocate arrays
 
@@ -320,7 +317,10 @@ class ComputeSpectrum:
         
         # dampening term to reduce low-s oscillations when using cutoff
         # this is basically a Lanczos window, see https://en.wikipedia.org/wiki/Window_function
-        if damp:
+        if damp and rcut == np.inf:
+            mpiprint ("Warning: damp set to true but no cutoff used. Not applying dampening term.")
+
+        if damp and rcut < np.inf:
             damping = np.sin(np.pi*ri/self.rcut)/(np.pi*ri/self.rcut)
         else:
             damping = np.ones(self.nbin)
