@@ -348,10 +348,10 @@ class ComputeSpectrum:
         
         # dampening term to reduce low-s oscillations when using cutoff
         # this is basically a Lanczos window, see https://en.wikipedia.org/wiki/Window_function
-        if damp and rcut == np.inf:
+        if damp and self.rcut == np.inf:
             mpiprint ("Warning: damp set to true but no cutoff used. Not applying dampening term.")
 
-        if damp and rcut < np.inf:
+        if damp and self.rcut < np.inf:
             damping = np.sin(np.pi*ri/self.rcut)/(np.pi*ri/self.rcut)
         else:
             damping = np.ones(self.nbin)
