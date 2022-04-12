@@ -71,13 +71,26 @@ def jpbc_wrap(xyz, box):
 @jit(nopython=True, cache=True, fastmath=True, nogil=True)
 def jaccumulate_spectrum(binlist, ncont, damping, ri, srange):
     return np.array([np.sum((binlist-ncont)*damping*np.sin(2*np.pi*_s*ri)/(2*np.pi*_s*ri)) for _s in srange], dtype=np.float64)
- 
+
 
 class ComputeSpectrum:
-    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None, precision="double", dr=0.001):
+    def __init__(self, readfile, rcut=np.inf, pbc=False, rpartition=None, precision="double", dr=0.001, skip=False):
+
         # store reference to readfile instance
         self.readfile = readfile 
-        
+ 
+        # skip initialisation for histogram-import mode
+        self.skip = skip
+        self.nrho = None
+        if skip:
+            self.ri = readfile.histogram[:,0]
+            self.binlist = readfile.histogram[:,1]
+            self.dr = self.ri[1]-self.ri[0]
+            self.rcut = readfile.rcut
+            self.nrho = readfile.nrho
+            self.nbin = len(self.binlist)
+            return None 
+       
         # do not permit a cutoff larger than half the box length (minimum image convention)
         if pbc:
             if rcut > .5*np.min(self.readfile.box):
@@ -253,6 +266,10 @@ class ComputeSpectrum:
 
 
     def build_histogram(self, dr=0.001):
+        if self.skip:
+            mpiprint ("Skipping histogram building.")
+            return 0
+
         if nprocs > 1:
             mpiprint ("Building histogram in parallel using %d threads." % nprocs) 
         else:
@@ -361,7 +378,7 @@ class ComputeSpectrum:
             ncont = natoms * 4*np.pi*ri*ri*self.dr * ndensity
         else:
             ncont = np.zeros(self.nbin)
-    
+
         # compile function
         mpiprint ("Compiling DS spectrum function...")
         spectrum = jaccumulate_spectrum(self.binlist, ncont, damping, ri, srange[:3])

@@ -29,19 +29,43 @@ def mpiprint(*arg):
 
 
 class ReadFile:
-    def __init__(self, fpath, filetype="restart"):
+    def __init__(self, fpath, filetype="data"):
         self.fpath = fpath
         self.filetype = filetype
         
     def load(self, shuffle=False):
+
+        # histogram files are handled specially
+        if self.filetype == "hist":
+            # file is read in by one thread
+            if (me == 0):
+                self.read_hist(self.fpath)
+            else:
+                self.rcut      = None
+                self.natoms    = None
+                self.nrho      = None
+                self.histogram = None
+            comm.barrier()
+
+            # import data is copied to all other threads
+            self.rcut      = comm.bcast(self.rcut, root=0)
+            self.natoms    = comm.bcast(self.natoms, root=0)
+            self.nrho      = comm.bcast(self.nrho, root=0)
+            self.histogram = comm.bcast(self.histogram, root=0)
+
+            mpiprint ("Imported %d bins from %s file: %s" % (len(self.histogram), self.filetype, self.fpath))
+            mpiprint ()
+            return 0
+
+
         # file is read in by one thread
         if (me == 0): 
-            if self.filetype == "restart":
-                self.xyz, self.cell = self.read_restart(self.fpath)
+            if self.filetype == "data":
+                self.xyz, self.cell = self.read_data(self.fpath)
             elif self.filetype == "dump":
                 self.xyz, self.cell = self.read_dump(self.fpath)
             else:
-                mpiprint ("Error: unknown file type, only restart or dump are accepted.")
+                mpiprint ("Error: unknown file type, only data or dump are accepted.")
                 
             self.xyz    = self.xyz - self.cell[:,0]
             self.box    = self.cell[:,1] - self.cell[:,0]
@@ -115,7 +139,7 @@ class ReadFile:
         return _xyz, _cell
 
     
-    def read_restart(self, fpath):
+    def read_data(self, fpath):
         with open(fpath, 'r') as _dfile:
             _dfile.readline()
             _dfile.readline()
@@ -142,3 +166,15 @@ class ReadFile:
             self.ortho = True
             
         return _xyz, _cell
+
+    def read_hist(self, fpath):
+        with open(fpath, 'r') as fopen:
+            self.rcut   = float(fopen.readline().split()[-1])
+            self.natoms =   int(fopen.readline().split()[-1])
+            self.nrho   = float(fopen.readline().split()[-1])
+
+        self.histogram = np.loadtxt(fpath, dtype=(float, int))
+
+
+
+
