@@ -5,6 +5,7 @@ import argparse, textwrap
 import numpy as np
 
 from lib.computespec import ComputeSpectrum 
+from lib.structurefactor import StructureFactor
 from lib.readfile import ReadFile
 
 # template to replace MPI functionality for single threaded use
@@ -42,10 +43,10 @@ class RawFormatter(argparse.HelpFormatter):
 def main():
 
     program_descripton = f'''
-        PyDebye v0.1
+        PyDebye v0.2
 
         Tool to compute the Debye-Scherrer line profile for LAMMPS dump and restart files, written in 100% Python. 
-        Supports periodic boundary conditions for orthogonal simulation cells using the minimum image convention.
+        Supports periodic boundary conditions for orthogonal simulation cells beyond the minimum image convention.
 
         Max Boleininger, Nov 2020
         max.boleininger@ukaea.uk
@@ -79,6 +80,11 @@ def main():
                         help="histogram spacing in Angstrom (default: %(default)s)")
     parser.add_argument("-hx", "--histexport", default="histogram.dat", 
                         help="export path of histogram file (default: %(default)s)")
+    parser.add_argument("-fuzz", "--fuzzygrain", type=float, default=0.0,
+                        help="fuzzy grain approximation for PBC (WIP!) (default: %(default)s)")
+    parser.add_argument("-gsim", "--grainsim", nargs=2, type=float, default=None,
+                        help=" mean radius and standard deviation in Ang of simulated grain size distribution (default: %(default)s)")
+
 
     # spectrum construction options
     parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
@@ -116,8 +122,12 @@ def main():
     else:
         doskip = False
 
-    cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip)
+    cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip, fuzzy=args.fuzzygrain, gsim=args.grainsim)
     cspec.build_histogram(dr=args.dr)
+    #sfac = StructureFactor(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip)
+    #sfac.build_structurefactor()
+
+    #return 0
 
     if args.filetype != "hist":
         if (me == 0):
@@ -125,7 +135,11 @@ def main():
             # write additional parameters needed for computing the spectrum to header
             natoms = cspec.readfile.natoms
             hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
-            np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
+
+            if args.grainsim:
+                np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)
+            else:
+                np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
             print ()
 
     spectrum = cspec.build_debyescherrer(args.smin, args.smax, args.spoints, damp=args.infdamping, ccorrection=args.continuumcorrection, nrho=cspec.nrho)
@@ -135,21 +149,6 @@ def main():
         np.savetxt(args.specexport, spectrum)
         print ()
     comm.barrier()
-
-    '''
-    fpath = 'lammpsfiles/vacanneal_slow_9_1800.relax'
-
-    filedat = ReadFile(fpath, filetype="restart")
-    filedat.load(shuffle=True)
-
-    cspec = ComputeSpectrum(filedat, rpartition=10., pbc=True, rcut=30.0)
-    cspec.build_histogram(dr=0.001)
-
-    spectrum = cspec.build_debyescherrer(.3, 1.2, 200, damp=True, ccorrection=True)
-
-    if (me == 0):
-        np.savetxt("spectrum.out", spectrum)
-    '''
 
     return 0
 
