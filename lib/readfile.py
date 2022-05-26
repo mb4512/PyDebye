@@ -61,16 +61,16 @@ class ReadFile:
         # file is read in by one thread
         if (me == 0): 
             if self.filetype == "data":
-                self.xyz, self.cell = self.read_data(self.fpath)
+                self.xyz, self.cell, self.cmat = self.read_data(self.fpath)
             elif self.filetype == "dump":
-                self.xyz, self.cell = self.read_dump(self.fpath)
+                self.xyz, self.cell, self.cmat = self.read_dump(self.fpath)
             else:
                 mpiprint ("Error: unknown file type, only data or dump are accepted.")
                 
             self.xyz    = self.xyz - self.cell[:,0]
             self.box    = self.cell[:,1] - self.cell[:,0]
-            self.natoms = len(self.xyz)
-            
+            self.natoms = len(self.xyz)           
+ 
             if shuffle:
                 print ("Shuffling atoms.")
                 np.random.shuffle(self.xyz)
@@ -79,11 +79,13 @@ class ReadFile:
             self.box    = None
             self.natoms = None
             self.ortho  = None
+            self.cmat = None
         comm.barrier()
         
         # import data is copied to all other threads
         self.xyz    = comm.bcast(self.xyz, root=0)
         self.box    = comm.bcast(self.box, root=0)
+        self.cmat   = comm.bcast(self.cmat, root=0)
         self.natoms = comm.bcast(self.natoms, root=0)
         self.ortho  = comm.bcast(self.ortho, root=0)
 
@@ -117,15 +119,24 @@ class ReadFile:
                 a = np.array([xhi - xlo, 0., 0.])
                 b = np.array([xy,yhi - ylo, 0.])
                 c = np.array([xz,yz,zhi-zlo])
-                L = np.array([a,b,c])
+                L = np.array([a,b,c], dtype=float)
 
+                _cmat = L 
                 _cell = np.array([[xlb,xhb], [ylb,yhb], [zlo,zhi]], dtype=float)
 
             else:
                 # Orthogonal case 
-                xlo,xhi = _dfile.readline().split()
-                ylo,yhi = _dfile.readline().split()
-                zlo,zhi = _dfile.readline().split()
+                xlo,xhi = np.array(_dfile.readline().split(), dtype=float)
+                ylo,yhi = np.array(_dfile.readline().split(), dtype=float)
+                zlo,zhi = np.array(_dfile.readline().split(), dtype=float)
+
+                # cell vector matrix
+                a = np.array([xhi - xlo, 0., 0.])
+                b = np.array([0.,yhi - ylo, 0.])
+                c = np.array([0.,0.,zhi-zlo])
+                L = np.array([a,b,c], dtype=float)
+
+                _cmat = L 
                 _cell = np.array([[xlo,xhi], [ylo,yhi], [zlo,zhi]], dtype=float)
 
             # read in atomic coordinates
@@ -136,7 +147,7 @@ class ReadFile:
                 _xyz = [_dfile.readline().rstrip("\n").split(" ")[2:5] for i in range(natoms)]
                 _xyz = np.array(_xyz, dtype=float)
 
-        return _xyz, _cell
+        return _xyz, _cell, _cmat
 
     
     def read_data(self, fpath):
@@ -147,9 +158,18 @@ class ReadFile:
 
             _dfile.readline()
             _dfile.readline()
-            xlo,xhi = _dfile.readline().split()[:2]
-            ylo,yhi = _dfile.readline().split()[:2]
-            zlo,zhi = _dfile.readline().split()[:2]
+
+            xlo,xhi = np.array(_dfile.readline().split()[:2], dtype=float)
+            ylo,yhi = np.array(_dfile.readline().split()[:2], dtype=float)
+            zlo,zhi = np.array(_dfile.readline().split()[:2], dtype=float)
+
+            # cell vector matrix
+            a = np.array([xhi - xlo, 0., 0.])
+            b = np.array([0.,yhi - ylo, 0.])
+            c = np.array([0.,0.,zhi-zlo])
+            L = np.array([a,b,c], dtype=float)
+
+            _cmat = L 
             _cell = np.array([[xlo,xhi], [ylo,yhi], [zlo,zhi]], dtype=float)
 
             _dfile.readline()
@@ -165,7 +185,7 @@ class ReadFile:
 
             self.ortho = True
             
-        return _xyz, _cell
+        return _xyz, _cell, _cmat
 
     def read_hist(self, fpath):
         with open(fpath, 'r') as fopen:
