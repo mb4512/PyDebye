@@ -256,6 +256,10 @@ class ComputeSpectrum:
         self.rbuffer = rbuffer
         self.xyz_partitioned = xyz_partitioned
 
+        #print ("partition_midpts", partition_midpts)
+        self.partsize = len(partition_midpts)
+        #print (self.partsize)
+
         # duplicate and translate partitions using periodic cell vectors, for PBC beyond minimal image convention
         if self.pbc:
 
@@ -350,7 +354,10 @@ class ComputeSpectrum:
                     psize_fuzzy = np.rint(weights*psize[_pmod]).astype(int)
                     cnebs = [(self.xyz_partitioned[_pmod[_pi]][:psize_fuzzy[_pi]] + self.ctrans[int(_p/self.partsize)]) for _pi,_p in enumerate(pindices)]
                 else:
-                    cnebs = [(self.xyz_partitioned[_p%self.partsize] + self.ctrans[int(_p/self.partsize)]) for _p in pindices]
+                    if self.pbc:
+                        cnebs = [(self.xyz_partitioned[_p%self.partsize] + self.ctrans[int(_p/self.partsize)]) for _p in pindices]
+                    else:
+                        cnebs = [self.xyz_partitioned[_p%self.partsize] for _p in pindices]
                 cnebs = np.concatenate(cnebs)
 
                 for bstart in range(0, len(cnebs), BSIZE):

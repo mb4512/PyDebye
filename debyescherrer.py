@@ -5,7 +5,7 @@ import argparse, textwrap
 import numpy as np
 
 from lib.computespec import ComputeSpectrum 
-from lib.structurefactor import StructureFactor
+#from lib.structurefactor import StructureFactor
 from lib.readfile import ReadFile
 
 # template to replace MPI functionality for single threaded use
