@@ -118,7 +118,8 @@ class StructureFactor:
         bmax = np.max(xyz, axis=0)
 
         # include a buffer region to make sure we do not cut off any broadened atomic densities
-        rbuffer = 1.5*self.rc
+        #rbuffer = 1.5*self.rc
+        rbuffer = 0.0
 
         self.bmin = bmin - rbuffer
         self.bmax = bmax + rbuffer
