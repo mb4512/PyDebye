@@ -5,7 +5,7 @@ import argparse, textwrap
 import numpy as np
 
 from lib.computespec import ComputeSpectrum 
-#from lib.structurefactor import StructureFactor
+from lib.structurefactor import StructureFactor
 from lib.readfile import ReadFile
 
 # template to replace MPI functionality for single threaded use
@@ -43,10 +43,11 @@ class RawFormatter(argparse.HelpFormatter):
 def main():
 
     program_descripton = f'''
-        PyDebye v0.2
+        PyDebye v0.3
 
         Tool to compute the Debye-Scherrer line profile for LAMMPS dump and restart files, written in 100% Python. 
         Supports periodic boundary conditions for orthogonal simulation cells beyond the minimum image convention.
+        Supports real-space method and N*log(N) scaling fourier-space method (requires FFTW library).
 
         Max Boleininger, Nov 2020
         max.boleininger@ukaea.uk
@@ -67,7 +68,11 @@ def main():
     parser.add_argument("-ft", "--filetype", nargs="?", default="dump", const="all", 
                         choices=("dump", "data", "hist"), help="input file format, accepting dump, data, hist (default: %(default)s)")
 
-    # histogram construction arguments 
+    # real space or fourier space method 
+    parser.add_argument("-m", "--method", nargs="?", default="real", const="all",
+                        choices=("real", "fft"), help="Real space or fourier space method (default: %(default)s)")
+
+    # real space method histogram construction arguments 
     parser.add_argument("-ord", "--ordered", action="store_false", 
                         help="Keep atoms ordered as in input file  (default: %(default)s)")
     parser.add_argument("-pbc", "--pbc", action="store_true", 
@@ -85,10 +90,7 @@ def main():
     parser.add_argument("-gsim", "--grainsim", nargs=2, type=float, default=None,
                         help=" mean radius and standard deviation in Ang of simulated grain size distribution (default: %(default)s)")
 
-
-    # spectrum construction options
-    parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
-                        help="export path of spectrum file (default: %(default)s)")
+    # real space method spectrum construction options
     parser.add_argument("-smin", "--smin", type=float, default=0.3,
                         help="minimum s value of spectrum range (default: %(default)s)")
     parser.add_argument("-smax", "--smax", type=float, default=1.2,
@@ -99,6 +101,10 @@ def main():
                         help="apply infinite medium dampening (default: %(default)s)")
     parser.add_argument("-ccor", "--continuumcorrection", action="store_true", 
                         help="apply continuum correction dampening (default: %(default)s)")
+
+    # export path of final spectrum
+    parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
+                        help="export path of spectrum file (default: %(default)s)")
 
     args = parser.parse_args()
 
@@ -117,32 +123,37 @@ def main():
     filedat = ReadFile(fpath, filetype=args.filetype)
     filedat.load(shuffle = ~args.ordered)
 
-    if args.filetype=="hist":
-        doskip = True 
-    else:
-        doskip = False
+    # fft based method
+    if args.method == "fft":
+        sfac = StructureFactor(filedat)
+        sfac.build_structurefactor_fftw()
+        spectrum = sfac.spectrum
 
-    cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip, fuzzy=args.fuzzygrain, gsim=args.grainsim)
-    cspec.build_histogram(dr=args.dr)
-    #sfac = StructureFactor(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip)
-    #sfac.build_structurefactor()
+    # real space based method
+    elif args.method == "real":
+        if args.filetype=="hist":
+            doskip = True 
+        else:
+            doskip = False
 
-    #return 0
+            cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip, fuzzy=args.fuzzygrain, gsim=args.grainsim)
+            cspec.build_histogram(dr=args.dr)
 
-    if args.filetype != "hist":
-        if (me == 0):
-            print ("\nExporting histogram to file %s" % args.histexport)
-            # write additional parameters needed for computing the spectrum to header
-            natoms = cspec.readfile.natoms
-            hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
+            if args.filetype != "hist":
+                if (me == 0):
+                    print ("\nExporting histogram to file %s" % args.histexport)
+                    # write additional parameters needed for computing the spectrum to header
+                    natoms = cspec.readfile.natoms
+                    hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
 
-            if args.grainsim:
-                np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)
-            else:
-                np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
-            print ()
+                    if args.grainsim:
+                        np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)
+                    else:
+                        np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
+                    mpiprint ()
 
-    spectrum = cspec.build_debyescherrer(args.smin, args.smax, args.spoints, damp=args.infdamping, ccorrection=args.continuumcorrection, nrho=cspec.nrho)
+            spectrum = cspec.build_debyescherrer(args.smin, args.smax, args.spoints, damp=args.infdamping, ccorrection=args.continuumcorrection, nrho=cspec.nrho)
+
 
     if (me == 0):
         print ("\nExporting DS spectrum to file %s" % args.specexport)

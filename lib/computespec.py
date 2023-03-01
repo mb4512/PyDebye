@@ -532,12 +532,10 @@ class ComputeSpectrum:
         return n 
     
     def _getdistances_pbc(self, xyz, _dvec, _r):
-        #n = jdisvec_pbc(xyz, _dvec, _r, self.readfile.box)
         n = jdisvec(xyz, _dvec, _r)
         return n 
 
     def _getdistances_pbc_partitioned(self, xyz, _dvec, _r):
-        #n = jdisvec_pbc(xyz, _dvec, _r, self.readfile.box)
         n = jdisvec(xyz, _dvec, _r)
         return n 
 
