@@ -4,8 +4,12 @@ from numba import jit
 
 from scipy.spatial import cKDTree
 
-# testing out parallel FFTW
-from mpi4py_fft import PFFT, newDistArray
+# try importing parallel FFTW library
+try:
+    from mpi4py_fft import PFFT, newDistArray
+    IMPORTED = "successful"
+except ImportError:
+    IMPORTED = ImportError("Could not load mpi4py_fft library. Is it installed?")
 
 # template to replace MPI functionality for single threaded use
 class MPI_to_serial():
@@ -54,6 +58,10 @@ def jpbc_wrap(xyz, box):
 class StructureFactor:
     def __init__(self, readfile, pbc=False, precision="double", dx=0.3):
 
+        # check if library available
+        if IMPORTED != "successful":
+            raise IMPORTED
+
         # store reference to readfile instance
         self.readfile = readfile 
  
@@ -72,6 +80,9 @@ class StructureFactor:
         self.pbc = pbc
 
         # change precision if single precision mode is requested 
+        mpiprint ("Constructing voxel field with dx=%.3f voxel spacing and computing FFT.\n" % self.dx)
+
+        ''' # TODO: test whether large grids need long float precision
         if precision == "single":
             self.single = True
             mpiprint ("Constructing voxel field and computing FFT in single precision mode.\n")
@@ -81,6 +92,7 @@ class StructureFactor:
 
         if self.single:
             self.readfile.xyz = self.readfile.xyz.astype(np.single)
+        '''
 
         comm.barrier() 
  
@@ -255,8 +267,9 @@ class StructureFactor:
 
         # obtain structure factor from fourier transform
         self.psi_k = fft.forward(self.uvox)
-        print ("resulting tensor shape on thread %d:" % me, self.psi_k.shape)
 
+        #print ("resulting tensor shape on thread %d:" % me, self.psi_k.shape)
+        #sys.stdout.flush()
 
         # define diffraction intensity
         self.int_k = self.psi_k.real*self.psi_k.real + self.psi_k.imag*self.psi_k.imag

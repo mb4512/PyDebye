@@ -102,6 +102,10 @@ def main():
     parser.add_argument("-ccor", "--continuumcorrection", action="store_true", 
                         help="apply continuum correction dampening (default: %(default)s)")
 
+    # fourier space method construction arguments
+    parser.add_argument("-dx", "--voxelspacing", type=float, default=0.3,
+                        help="voxel spacing in Angstrom. Smaller spacings translate to denser k-space sampling (default: %(default)s)")
+
     # export path of final spectrum
     parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
                         help="export path of spectrum file (default: %(default)s)")
@@ -125,7 +129,7 @@ def main():
 
     # fft based method
     if args.method == "fft":
-        sfac = StructureFactor(filedat)
+        sfac = StructureFactor(filedat, dx=args.voxelspacing)
         sfac.build_structurefactor_fftw()
         spectrum = sfac.spectrum
 
