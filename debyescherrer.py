@@ -5,8 +5,10 @@ import argparse, textwrap
 import numpy as np
 
 from lib.computespec import ComputeSpectrum 
-from lib.structurefactor import StructureFactor
+from lib.structurefactor import StructureFactor, jSOAS_voxel
 from lib.readfile import ReadFile
+
+import time
 
 # template to replace MPI functionality for single threaded use
 class MPI_to_serial():
@@ -127,14 +129,14 @@ def main():
     filedat = ReadFile(fpath, filetype=args.filetype)
     filedat.load(shuffle = ~args.ordered)
 
-    # fft based method
     if args.method == "fft":
+        # fft based method
         sfac = StructureFactor(filedat, dx=args.voxelspacing)
-        sfac.build_structurefactor_fftw()
+        sfac.SOAS_build_structurefactor_fftw()
         spectrum = sfac.spectrum
 
-    # real space based method
     elif args.method == "real":
+        # real space based method
         if args.filetype=="hist":
             doskip = True 
         else:

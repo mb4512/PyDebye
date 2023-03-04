@@ -1,4 +1,4 @@
-import sys, time
+import sys, time, math
 import numpy as np
 from numba import jit
 
@@ -79,199 +79,70 @@ class StructureFactor:
         self.dx = dx # voxel spacing in Angstrom 
         self.pbc = pbc
 
-        # change precision if single precision mode is requested 
         mpiprint ("Constructing voxel field with dx=%.3f voxel spacing and computing FFT.\n" % self.dx)
 
-        ''' # TODO: test whether large grids need long float precision
-        if precision == "single":
-            self.single = True
-            mpiprint ("Constructing voxel field and computing FFT in single precision mode.\n")
-        else:
-            self.single = False
-            mpiprint ("Constructing voxel field and computing FFT in double precision mode.\n")
-
-        if self.single:
-            self.readfile.xyz = self.readfile.xyz.astype(np.single)
-        '''
-
         comm.barrier() 
- 
-    def prepare_voxels(self):
-        '''Set dimensions of the 3D voxel field. Valid for both orthogonal and nonorthogonal cells.'''
-
-        xyz = self.readfile.xyz
-        cmat = self.readfile.cmat
-
-        # gaussian standard-deviation in angstrom
-        self.sig = self.dx/2
-
-        # gaussian cutoff is 4 standard deviations
-        # note that the higher the cutoff, the more accurate the summation
-        # density = -exp(-.5*q^2) sqrt(2/pi)*q + erf(q/sqrt(2))
-        # 3 std: 97.07% density
-        # 4 std: 99.88% density
-        # 5 std: 99.9985% density
-        self.rc = 4*self.sig
-
-        # we need a regular and evenly spaced mesh in a bounding box enclosing all atoms in the system
-        bmin = np.min(xyz, axis=0)
-        bmax = np.max(xyz, axis=0)
-
-        # include a buffer region to make sure we do not cut off any broadened atomic densities
-        #rbuffer = 1.5*self.rc
-        rbuffer = 0.0
-
-        self.bmin = bmin - rbuffer
-        self.bmax = bmax + rbuffer
-
-        # voxel mesh has dimensions of (N_vox, 3)
-        self.v0 = np.arange(self.bmin[0], self.bmax[0], self.dx)
-        self.v1 = np.arange(self.bmin[1], self.bmax[1], self.dx)
-        self.v2 = np.arange(self.bmin[2], self.bmax[2], self.dx)
-
-        # ensure voxel array dimensions are even for easier handling of fft frequencies
-        if len(self.v0)%2 == 1:
-            self.v0 += 1
-        if len(self.v1)%2 == 1:
-            self.v1 += 1
-        if len(self.v2)%2 == 1:
-            self.v2 += 1
-
-        # dimensions of 3D voxel array 
-        self.vdim = np.array([len(self.v0), len(self.v1), len(self.v2)], dtype=int) 
-
- 
-    def create_voxels(self, slabindex):
-        mpiprint ("\nBuilding Gaussian density representation on a voxel grid, distributed over threads.")
-
-        clock = time.time()       
- 
-        xyz = self.readfile.xyz
-        cmat = self.readfile.cmat
-
-        # start and end indices along 1st axis of the voxel tensor 
-        # note: index0 and indexE are different on each thread, this is where the parallel distribution occurs
-        myshape = self.uvox.shape
-        nvox = np.product(self.uvox.global_shape)
-        index0 = slabindex[me] 
-        indexE = slabindex[me+1]
-
-        # build a KD-tree of all atoms 
-        self.xyztree = cKDTree(xyz)
-
-        # normalisation prefactor 
-        pref = self.dx**3 * 1/(np.power(2.*np.pi*self.sig**2, 3/2))
-
-        # create a line of voxel coordinates: going along all y indices (2nd axis) while x and y are fixed
-        voxelline = np.array([[1., j*self.dx, 1.] for j in range(myshape[1])])
-        voxelxyz = np.copy(voxelline)
-
-        # compile gaussian distance function
-        mpiprint("Compiling...")
-        jdisgauss(xyz[:20], voxelxyz[0], self.sig)
-        mpiprint("done.\n")
-
-        # benchmark first
-        if (me == 0):
-            clock = time.time()
-            ilocal = 0
-            for i in range(index0, indexE):
-                k = 0
-                voxelxyz = np.copy(voxelline)
-                voxelxyz[:,0] *= i*self.dx
-                voxelxyz[:,2] *= k*self.dx
-                voxelxyz += self.bmin
-                _ixlist = self.xyztree.query_ball_point(voxelxyz, self.rc)
-                _nvox = len(voxelxyz)
-                self.uvox[ilocal,:,k] = [jdisgauss(xyz[_ixlist[_n]], voxelxyz[_n], self.sig) for _n in range(_nvox)]
-                ilocal += 1
-
-            print (ilocal, _nvox, nvox)
-            clock = time.time() - clock
-            looptime  = clock/(ilocal*_nvox)
-            totaltime = looptime * nvox/nprocs # total est. runtime in seconds
-
-            print ("Estimated runtime per voxel: %.1fµs" % (1e6*looptime))
-            print ("Estimated total runtime:     %.3fs"  % totaltime)
-            print ()
-            self.uvox *= 0
-
-        comm.barrier()
-        clock = time.time()
-    
-        # populate voxels with gaussian atomic density
-        clock = time.time()
-        ilocal = 0
-        for i in range(index0, indexE):
-            for k in range(myshape[2]):
-                voxelxyz = np.copy(voxelline)
-                voxelxyz[:,0] *= i*self.dx
-                voxelxyz[:,2] *= k*self.dx
-                voxelxyz += self.bmin
-                _ixlist = self.xyztree.query_ball_point(voxelxyz, self.rc)
-                _nvox = len(voxelxyz)
-                self.uvox[ilocal,:,k] = [jdisgauss(xyz[_ixlist[_n]], voxelxyz[_n], self.sig) for _n in range(_nvox)]
-            ilocal += 1
-
-        # apply prefactor
-        self.uvox *= pref
-
-        # get integrated density in this slab
-        nlocal = np.sum(self.uvox)
-
-        # here all processes need to finish
-        comm.barrier()
-
-        clock = time.time() - clock
-        mpiprint ("Populated %d voxels in %.3f seconds.\n" % (nvox, clock))
-
-        # gather all densities
-        nlocalarray = comm.allgather(nlocal)
-        
-        mpiprint ("Total number of atoms:    %d" % len(xyz))
-        mpiprint ("Integrated voxel density: %.2f" % np.sum(nlocalarray))
-        mpiprint ("Error: %.2f %%" % ((len(xyz)-np.sum(nlocalarray))/len(xyz)*100))
-        mpiprint ()
-
-        # renormalise voxeldensities to conserve number of atoms
-        self.uvox = self.uvox*len(xyz)/np.sum(nlocalarray)
-
-        return 0
 
 
-    def build_structurefactor_fftw(self):
- 
+    def SOAS_build_structurefactor_fftw(self):
+
         # prepare dimensions of the voxel grid
-        self.prepare_voxels() 
-      
+        cellnorms = np.linalg.norm(self.readfile.cmat, axis=1)
+        global_shape = 1 + (cellnorms/self.dx).astype(int)
+        self.global_shape = global_shape 
+        nvox = np.product(global_shape)
+
+        self.dxres = cellnorms/global_shape
+        mpiprint ("Spacing along cell vectors in Angstrom:", self.dxres)
+
         # initialise distributed tensor on all cores in slab distribution: 
         # the 1st axis of the tensor is distributed among the cores 
-        fft = PFFT(MPI.COMM_WORLD, self.vdim, axes=(0, 1, 2), dtype=float, grid=(-1,))
+        fft = PFFT(MPI.COMM_WORLD, self.global_shape, axes=(0, 1, 2), dtype=float, grid=(-1,))
         self.uvox = newDistArray(fft, False)
         myshape = self.uvox.shape
-        globalshape = self.uvox.global_shape
 
         # gather the slab thicknesses into one list
         indexlist = comm.allgather(myshape[0])
         
-        mpiprint ("Global shape of the voxel grid:", self.uvox.global_shape, "with total number of voxels:", np.product(self.uvox.global_shape))
+        mpiprint ("Global shape of the voxel grid:", global_shape, "with total number of voxels:", nvox)
         mpiprint ("Voxel grid is distributed into slabs along axis 0 of size:", indexlist)
+        mpiprint ()
+        sys.stdout.flush()
 
         # list of voxel slab indices to be constructed by each thread 
         slabindex = np.r_[0, np.cumsum(indexlist)]
 
-        # populate tensor with atomic densities
-        self.create_voxels(slabindex)
+        # create voxel smoothing kernel
+        mpiprint ("Building voxel kernel...")
+        kernel, iacell = self.SOAS_kernel()
+        mpiprint ("done.\n")
 
+        # populate voxel tensor with atomic densities
+        mpiprint ("Compiling voxelisation routine...")
+        jSOAS_voxel(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
+        mpiprint ("done.\n")
+
+        clock = time.time()
+        mpiprint ("Voxelising...")
+        jSOAS_voxel(kernel, self.readfile.xyz, iacell, self.uvox, global_shape, slabindex[me])
+        mpiprint ("done.\n")
+        clock = time.time() - clock
+
+        mpiprint ("Populated %d voxels in %.3f seconds." % (nvox, clock))
+        mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
         mpiprint ()
-        mpiprint ("Applying FFT...")
+
 
         # obtain structure factor from fourier transform
+        clock = time.time()
+        mpiprint ("Applying FFT...")
         self.psi_k = fft.forward(self.uvox)
+        mpiprint ("done.\n")
+        clock = time.time() - clock
 
-        #print ("resulting tensor shape on thread %d:" % me, self.psi_k.shape)
-        #sys.stdout.flush()
-
+        mpiprint ("Transformed %d voxels in %.3f seconds." % (nvox, clock))
+        mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
+   
         # define diffraction intensity
         self.int_k = self.psi_k.real*self.psi_k.real + self.psi_k.imag*self.psi_k.imag
         newshape = self.int_k.shape
@@ -280,56 +151,50 @@ class StructureFactor:
         newindexlist = comm.allgather(newshape[1])
         newslabindex = np.r_[0, np.cumsum(newindexlist)]
 
-        # kx, ky, kz space resolution
-        dk = 1./(self.vdim*self.dx)
-        self.kmax = np.linalg.norm(self.uvox.global_shape * dk)
+        # construct reciprocal vectors
+        a0,a1,a2 = self.readfile.cmat        
+        ivol = 1./np.dot(a0, np.cross(a1, a2))
+        b0 = ivol * np.cross(a1, a2) 
+        b1 = ivol * np.cross(a2, a0) 
+        b2 = ivol * np.cross(a0, a1) 
 
-        mpiprint("k-space spacing:", dk)
-        mpiprint("maximum k norm:", self.kmax)
+        mpiprint ("\nReciprocal space vectors for voxel grid:")
+        mpiprint (b0)
+        mpiprint (b1)
+        mpiprint (b2)
 
         # set some k space resolution for binning
-        kres = np.linalg.norm(dk) 
+        kres = np.linalg.norm(b0+b1+b2)
+        
+        self.kmax = np.linalg.norm(global_shape[0]*b0 + global_shape[1]*b1 + global_shape[2]*b2)
+        mpiprint ("maximum k norm:", self.kmax)
+        mpiprint ()
+
+        # bin diffraction intensity over all k-directions 
         _spectrum = np.zeros(int(self.kmax/kres)+1)
 
+        mpiprint ("Compiling binning routine...")
+        _slice = self.int_k[:min(3, newshape[0]), :min(3, newshape[1]), :min(3, newshape[2])]
+        jSOAS_spectrum(_spectrum, kres, b0, b1, b2, _slice, newshape, global_shape, slabindex[me])
+        _spectrum *= 0
+        mpiprint ("done.\n")
 
-        # bin diffraction intensity over all k-directions
-        for i in range(newshape[0]): 
-            for j in range(newshape[1]): 
-                for k in range(newshape[2]):
+        mpiprint ("Binning...")
+        clock = time.time()
+        jSOAS_spectrum(_spectrum, kres, b0, b1, b2, self.int_k, newshape, global_shape, slabindex[me])
+        mpiprint ("done.\n")
+        clock = time.time() - clock
 
-                    # the tensor is distributed over axis 1, hence offset j index appropriately 
-                    iv, jv, kv = i, j + newslabindex[me], k
-
-                    # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
-                    if iv > globalshape[0]/2:
-                        iv -= globalshape[0]
-                    if jv > globalshape[1]/2:
-                        jv -= globalshape[1]
-                    if kv > globalshape[2]/2:
-                        kv -= globalshape[2]
-
-                    # norm of the k vector belonging to this voxel
-                    knorm = np.linalg.norm([dk[0]*iv, dk[1]*jv, dk[2]*kv])
-
-                    # as the input signal is real, we need to double-count all except for the kz=0 value.
-                    d3kelement = 4.*np.pi*knorm*knorm*kres
-
-                    if knorm > 0.0:
-                        _pref = np.sqrt((dk[0]*iv)*(dk[0]*iv) + (dk[1]*jv)*(dk[1]*jv))/knorm/d3kelement
-                    else:
-                        _pref = 1.0
-                    if k == 0: 
-                        _spectrum[int(knorm/kres)] += self.int_k[i,j,k] * _pref 
-                    else:
-                        _spectrum[int(knorm/kres)] += 2*self.int_k[i,j,k] * _pref 
-
-
+        mpiprint ("Binned all k-points in %.3f seconds." % clock)
+        mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
+        mpiprint ()
+ 
         # collate results from all threads into one 
         spectrum = np.zeros_like(_spectrum)
         comm.Allreduce([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], op=MPI.SUM)
 
         # normalise
-        spectrum *= np.product(globalshape)
+        spectrum *= np.product(global_shape)
 
         # define diffraction spectrum
         krange = .5*kres + kres*np.arange(len(spectrum)) # bin mid-points
@@ -337,4 +202,158 @@ class StructureFactor:
 
         return 0
 
-   
+
+
+    def SOAS_kernel(self):
+    
+        nx,ny,nz = self.global_shape 
+
+        nfine = 10
+        infine = 1./nfine
+
+        kernel = np.zeros((nfine,nfine,nfine, 4,4,4))
+
+        # find the unit cell for the voxels and for the fine-mesh subdivision of the voxels
+        # assume rows of acell are the cell vectors
+        asuper = self.readfile.cmat 
+        acell = np.copy(self.readfile.cmat) 
+        acell[0] = asuper[0]/nx
+        acell[1] = asuper[1]/ny
+        acell[2] = asuper[2]/nz
+
+        # inverse voxel cell 
+        iacell = np.linalg.inv(acell)
+
+        afine = acell*infine
+        iafine = iacell*nfine
+
+        sigma = .5*np.min(np.linalg.norm(acell, axis=0))
+
+        # construct the kernel
+        i2s2 = 1./(2.*sigma*sigma) 
+
+        for ix in range(nfine):
+            for iy in range(nfine):
+                for iz in range(nfine):
+                    # construct position of point in fine cell
+                    xx = afine[0,0]*(ix+.5) + afine[1,0]*(iy+.5) + afine[2,0]*(iz+.5)
+                    yy = afine[0,1]*(ix+.5) + afine[1,1]*(iy+.5) + afine[2,1]*(iz+.5)
+                    zz = afine[0,2]*(ix+.5) + afine[1,2]*(iy+.5) + afine[2,2]*(iz+.5)
+
+                    ddsum = 0.0
+
+                    for jx in range(-1,3):
+                        for jy in range(-1,3):
+                            for jz in range(-1,3):
+                                # construct separation of node from point in fine cell
+                                dx = acell[0,0]*jx + acell[1,0]*jy + acell[2,0]*jz - xx
+                                dy = acell[0,1]*jx + acell[1,1]*jy + acell[2,1]*jz - yy
+                                dz = acell[0,2]*jx + acell[1,2]*jy + acell[2,2]*jz - zz
+
+                                dd = dx*dx + dy*dy + dz*dz
+                                dd = dd*i2s2
+
+                                if dd > 4.5: # 3*sigma range -> (3*sigma)^2/(2*sigma^2) = 9/2
+                                    dd = 0.
+                                else:
+                                    dd = math.exp(-dd)
+                               
+                                kernel[ix,iy,iz, 1+jx,1+jy,1+jz] = dd
+                                ddsum += dd
+
+                    # normalise
+                    ddsum = 1./ddsum
+                    kernel[ix,iy,iz, :,:,:] *= ddsum
+
+        return kernel, iacell
+
+
+
+@jit(nopython=True, fastmath=True)
+def jSOAS_spectrum(spectrum, kres, b0, b1, b2, int_k, new_shape, global_shape, slabindex):
+
+    # bin diffraction intensity over all k-directions
+    for i in range(new_shape[0]): 
+        for j in range(new_shape[1]): 
+            for k in range(new_shape[2]):
+
+                # the tensor is distributed over axis 1, hence offset j index appropriately 
+                iv, jv, kv = i, j + slabindex, k
+
+                # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
+                if iv > global_shape[0]/2:
+                    iv -= global_shape[0]
+                if jv > global_shape[1]/2:
+                    jv -= global_shape[1]
+                if kv > global_shape[2]/2:
+                    kv -= global_shape[2]
+
+                kx = iv*b0[0]+jv*b1[0]+kv*b2[0] 
+                ky = iv*b0[1]+jv*b1[1]+kv*b2[1] 
+                kz = iv*b0[2]+jv*b1[2]+kv*b2[2] 
+
+                # norm of the k vector belonging to this voxel
+                knorm = math.sqrt(kx*kx + ky*ky + kz*kz)
+
+                # as the input signal is real, we need to double-count all except for the kz=0 value.
+                d3kelement = 4.*np.pi*knorm*knorm*kres
+
+                if knorm > 0.0:
+                    _pref = math.sqrt(kx*kx + ky*ky)/knorm/d3kelement
+                else:
+                    _pref = 1.0
+                if k == 0: 
+                    spectrum[int(knorm/kres)] += int_k[i,j,k] * _pref 
+                else:
+                    spectrum[int(knorm/kres)] += 2*int_k[i,j,k] * _pref 
+
+    return 0
+
+ 
+@jit(nopython=True, fastmath=True)
+def jSOAS_voxel(kernel, xyz, iacell, rho, global_shape, slabindex):
+
+    nx_global,ny_global,nz_global = global_shape
+    nx,ny,nz = rho.shape # shape of distributed tensor 
+ 
+    natoms = len(xyz)
+    nfine = 10
+
+    # loop through each atom    
+    rho *= 0        
+    for ii in range(natoms):
+        # find the position of the atom in global voxel space
+        # should be 0:nx_global-1 etc., but the atom may be outside the periodic supercell bounds. Will fix below
+        xx = iacell[0,0]*xyz[ii,0] + iacell[1,0]*xyz[ii,1] + iacell[2,0]*xyz[ii,2]
+        yy = iacell[0,1]*xyz[ii,1] + iacell[1,1]*xyz[ii,1] + iacell[2,1]*xyz[ii,2]
+        zz = iacell[0,2]*xyz[ii,2] + iacell[1,2]*xyz[ii,1] + iacell[2,2]*xyz[ii,2]
+
+        # find which global voxel the atom sits in. Note: haven't yet made sure this cell is within range...
+        jx = int(xx) # eg xx = 12.3456 -> jx = 12
+        jy = int(yy)
+        jz = int(zz)
+
+        # ignore atoms that lie beyond a few slices outside the distributed domain
+        lx = jx%nx_global - slabindex # now this is within 1st periodic replica
+        if lx > nx+3 or lx < -3:
+            continue
+
+        # now find which fine kernel voxel the atom sits in.
+        ix = int((xx - jx)*nfine)  # xx = 12.3456 -> ix=3   (for NFINE = 10)
+        iy = int((yy - jy)*nfine) 
+        iz = int((zz - jz)*nfine) 
+
+        # now can add kernel
+        for kx in range(-1,3):
+            lx = (jx + kx)%nx_global - slabindex # now this is within 1st periodic replica
+            if lx < 0 or lx >= nx:
+                continue
+
+            for ky in range(-1,3):
+                ly = (jy + ky)%ny_global
+                for kz in range(-1,3):
+                    lz = (jz + kz)%nz_global
+
+                    rho[lx,ly,lz] += kernel[ix,iy,iz, 1+kx,1+ky,1+kz]
+
+    return 0
