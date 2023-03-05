@@ -108,6 +108,9 @@ def main():
     parser.add_argument("-dx", "--voxelspacing", type=float, default=0.3,
                         help="voxel spacing in Angstrom. Smaller spacings translate to denser k-space sampling (default: %(default)s)")
 
+    parser.add_argument("-fm", "--fftmode", nargs="?", default="FFTW", const="all", 
+                        choices=("FFTW", "SCIPY"), help="Which FFT library to use (default: %(default)s)")
+
     # export path of final spectrum
     parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
                         help="export path of spectrum file (default: %(default)s)")
@@ -131,8 +134,8 @@ def main():
 
     if args.method == "fft":
         # fft based method
-        sfac = StructureFactor(filedat, dx=args.voxelspacing)
-        sfac.SOAS_build_structurefactor_fftw()
+        sfac = StructureFactor(filedat, dx=args.voxelspacing) 
+        sfac.SOAS_build_structurefactor_fftw(fftmode=args.fftmode)
         spectrum = sfac.spectrum
 
     elif args.method == "real":

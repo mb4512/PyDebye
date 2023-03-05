@@ -2,11 +2,14 @@ import sys, time, math
 import numpy as np
 from numba import jit
 
-from scipy.spatial import cKDTree
+import scipy.fft
+
+from guppy import hpy; h=hpy()
+HEAP = False
 
 # try importing parallel FFTW library
 try:
-    from mpi4py_fft import PFFT, newDistArray
+    from mpi4py_fft import PFFT, newDistArray, DistArray
     IMPORTED = "successful"
 except ImportError:
     IMPORTED = ImportError("Could not load mpi4py_fft library. Is it installed?")
@@ -36,15 +39,6 @@ def mpiprint(*arg):
         print(*arg)
         sys.stdout.flush()
     return 0
-
-# global blocking size (in number of elements) used throughout this code
-BSIZE = 10000
-
-@jit(nopython=True, fastmath=True)
-def jdisgauss(xyz, _r, sigma):
-    _dr = (xyz-_r).T
-    gaussdensity = np.sum(np.exp(-(_dr[0]*_dr[0] + _dr[1]*_dr[1] + _dr[2]*_dr[2])/(2.*sigma*sigma)))
-    return gaussdensity
 
 
 #@jit(nopython=True, cache=True, fastmath=True)
@@ -84,31 +78,65 @@ class StructureFactor:
         comm.barrier() 
 
 
-    def SOAS_build_structurefactor_fftw(self):
+    def SOAS_build_structurefactor_fftw(self, fftmode="FFTW"):
+
+        if HEAP:
+            sys.stdout.flush()
+            mpiprint ("START OF SOAS")
+            for i in range(nprocs):
+                comm.barrier()
+                if i == me:
+                    heap_status = h.heap() 
+                    print ("\nTotal memory use on rank %d: %.3f GB" % (me, 1e-9*heap_status.size))
 
         # prepare dimensions of the voxel grid
         cellnorms = np.linalg.norm(self.readfile.cmat, axis=1)
         global_shape = 1 + (cellnorms/self.dx).astype(int)
+        global_shape[global_shape%2==1] += 1 # set even voxel dimensions (easier fft freq handling)
+
         self.global_shape = global_shape 
         nvox = np.product(global_shape)
-
         self.dxres = cellnorms/global_shape
+
+        if fftmode == "FFTW":
+            fac = 1
+        elif fftmode == "SCIPY":
+            fac = 2
+ 
         mpiprint ("Spacing along cell vectors in Angstrom:", self.dxres)
+        mpiprint ("Global shape of the voxel grid:", global_shape, "with total number of voxels:", nvox)
+        mpiprint ("Total tensor size: %.3f GB, per thread: %.3f GB" % (1e-9*8*nvox*fac, 1e-9*8*nvox/nprocs*fac))
+        mpiprint ()
 
         # initialise distributed tensor on all cores in slab distribution: 
         # the 1st axis of the tensor is distributed among the cores 
-        fft = PFFT(MPI.COMM_WORLD, self.global_shape, axes=(0, 1, 2), dtype=float, grid=(-1,))
-        self.uvox = newDistArray(fft, False)
-        myshape = self.uvox.shape
+        if fftmode == "FFTW":
+            mpiprint ("Constructing FFTW plan...")
+            fft = PFFT(MPI.COMM_WORLD, self.global_shape, axes=(0, 1, 2), dtype=float, grid=(-1,))
+            self.uvox = newDistArray(fft, False)
+            mpiprint ("done.")
+
+        elif fftmode == "SCIPY":
+            self.uvox = DistArray(global_shape, [0, 1, 1], dtype=complex)
+            self.uvox[:] *= 0.0
+
+        if HEAP: 
+            mpiprint ("FFTW plan distributed array")
+            sys.stdout.flush()
+            for i in range(nprocs):
+                comm.barrier()
+                if i == me:
+                    heap_status = h.heap() 
+                    print ("\nTotal memory use on rank %d: %.3f GB" % (me, 1e-9*heap_status.size))
+                    print(heap_status)
+
 
         # gather the slab thicknesses into one list
+        myshape = self.uvox.shape
         indexlist = comm.allgather(myshape[0])
-        
-        mpiprint ("Global shape of the voxel grid:", global_shape, "with total number of voxels:", nvox)
         mpiprint ("Voxel grid is distributed into slabs along axis 0 of size:", indexlist)
-        mpiprint ()
-        sys.stdout.flush()
-
+        mpiprint ()       
+ 
         # list of voxel slab indices to be constructed by each thread 
         slabindex = np.r_[0, np.cumsum(indexlist)]
 
@@ -116,6 +144,15 @@ class StructureFactor:
         mpiprint ("Building voxel kernel...")
         kernel, iacell = self.SOAS_kernel()
         mpiprint ("done.\n")
+
+        if HEAP:
+            for i in range(nprocs):
+                comm.barrier()
+                if i == me:
+                    heap_status = h.heap() 
+                    print ("\nTotal memory use on rank %d: %.3f GB" % (me, 1e-9*heap_status.size))
+                    print(heap_status)
+
 
         # populate voxel tensor with atomic densities
         mpiprint ("Compiling voxelisation routine...")
@@ -132,23 +169,41 @@ class StructureFactor:
         mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
         mpiprint ()
 
-
-        # obtain structure factor from fourier transform
         clock = time.time()
-        mpiprint ("Applying FFT...")
-        self.psi_k = fft.forward(self.uvox)
-        mpiprint ("done.\n")
-        clock = time.time() - clock
+        # obtain structure factor from fourier transform
+        if fftmode == "FFTW":
+            mpiprint ("Applying FFT...")
+            self.uvox = fft.forward(self.uvox)
+        elif fftmode == "SCIPY":
+            mpiprint ("Doing scipy complex FFT along axis 2...")
+            self.uvox[:] = scipy.fft.fft(self.uvox, axis=2, norm="forward")
 
+            mpiprint ("Doing scipy complex FFT along axis 1...")
+            self.uvox[:] = scipy.fft.fft(self.uvox, axis=1, norm="forward")
+            
+            # align along axis=0
+            self.uvox = self.uvox.redistribute(0)
+
+            mpiprint ("Doing scipy complex FFT along axis 0...")
+            self.uvox[:] = scipy.fft.fft(self.uvox, axis=0, norm="forward")
+        
+        mpiprint ("done.\n")
+
+        clock = time.time() - clock
         mpiprint ("Transformed %d voxels in %.3f seconds." % (nvox, clock))
         mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
-   
-        # define diffraction intensity
-        self.int_k = self.psi_k.real*self.psi_k.real + self.psi_k.imag*self.psi_k.imag
-        newshape = self.int_k.shape
 
-        # note: after the transformation, the tensor is distributed over axis 1
-        newindexlist = comm.allgather(newshape[1])
+        # define diffraction intensity
+        #self.int_k = self.psi_k.real*self.psi_k.real + self.psi_k.imag*self.psi_k.imag
+        #newshape = self.int_k.shape
+        newshape = self.uvox.shape
+
+        # note: after the transformation, the tensor is distributed along a different axis
+        if fftmode == "FFTW":
+            newindexlist = comm.allgather(newshape[1]) # fftw version
+        elif fftmode == "SCIPY":
+            newindexlist = comm.allgather(newshape[2]) # scipy version
+
         newslabindex = np.r_[0, np.cumsum(newindexlist)]
 
         # construct reciprocal vectors
@@ -174,14 +229,21 @@ class StructureFactor:
         _spectrum = np.zeros(int(self.kmax/kres)+1)
 
         mpiprint ("Compiling binning routine...")
-        _slice = self.int_k[:min(3, newshape[0]), :min(3, newshape[1]), :min(3, newshape[2])]
-        jSOAS_spectrum(_spectrum, kres, b0, b1, b2, _slice, newshape, global_shape, slabindex[me])
+        if fftmode == "FFTW":
+            slabi,slabj,slabk = 0,newslabindex[me],0 
+            dc = 1
+        elif fftmode == "SCIPY":
+            slabi,slabj,slabk = 0,0,newslabindex[me]
+            dc = 0
+
+        _slice = self.uvox[:min(3, newshape[0]), :min(3, newshape[1]), :min(3, newshape[2])]
+        jSOAS_spectrum_inplace(_spectrum, kres, b0, b1, b2, _slice, newshape, global_shape, slabi, slabj, slabk, dc) 
         _spectrum *= 0
         mpiprint ("done.\n")
 
         mpiprint ("Binning...")
         clock = time.time()
-        jSOAS_spectrum(_spectrum, kres, b0, b1, b2, self.int_k, newshape, global_shape, slabindex[me])
+        jSOAS_spectrum_inplace(_spectrum, kres, b0, b1, b2, self.uvox, newshape, global_shape, slabi, slabj, slabk, dc) 
         mpiprint ("done.\n")
         clock = time.time() - clock
 
@@ -201,7 +263,6 @@ class StructureFactor:
         self.spectrum = np.c_[krange, spectrum]
 
         return 0
-
 
 
     def SOAS_kernel(self):
@@ -270,7 +331,7 @@ class StructureFactor:
 
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_spectrum(spectrum, kres, b0, b1, b2, int_k, new_shape, global_shape, slabindex):
+def jSOAS_spectrum(spectrum, kres, b0, b1, b2, int_k, new_shape, global_shape, slabi, slabj, slabk, doublecount):
 
     # bin diffraction intensity over all k-directions
     for i in range(new_shape[0]): 
@@ -278,14 +339,14 @@ def jSOAS_spectrum(spectrum, kres, b0, b1, b2, int_k, new_shape, global_shape, s
             for k in range(new_shape[2]):
 
                 # the tensor is distributed over axis 1, hence offset j index appropriately 
-                iv, jv, kv = i, j + slabindex, k
+                iv, jv, kv = i + slabi, j + slabj, k + slabk
 
                 # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
-                if iv > global_shape[0]/2:
+                if iv >= global_shape[0]/2:
                     iv -= global_shape[0]
-                if jv > global_shape[1]/2:
+                if jv >= global_shape[1]/2:
                     jv -= global_shape[1]
-                if kv > global_shape[2]/2:
+                if kv >= global_shape[2]/2:
                     kv -= global_shape[2]
 
                 kx = iv*b0[0]+jv*b1[0]+kv*b2[0] 
@@ -302,11 +363,62 @@ def jSOAS_spectrum(spectrum, kres, b0, b1, b2, int_k, new_shape, global_shape, s
                     _pref = math.sqrt(kx*kx + ky*ky)/knorm/d3kelement
                 else:
                     _pref = 1.0
-                if k == 0: 
-                    spectrum[int(knorm/kres)] += int_k[i,j,k] * _pref 
+                
+                if doublecount:
+                    if k == 0: 
+                        spectrum[int(knorm/kres)] += int_k[i,j,k] * _pref 
+                    else:
+                        spectrum[int(knorm/kres)] += 2*int_k[i,j,k] * _pref 
                 else:
-                    spectrum[int(knorm/kres)] += 2*int_k[i,j,k] * _pref 
+                    spectrum[int(knorm/kres)] += int_k[i,j,k] * _pref
+    return 0
 
+
+@jit(nopython=True, fastmath=True)
+def jSOAS_spectrum_inplace(spectrum, kres, b0, b1, b2, psi_k, new_shape, global_shape, slabi, slabj, slabk, doublecount):
+
+    # bin diffraction intensity over all k-directions
+    for i in range(new_shape[0]): 
+        for j in range(new_shape[1]): 
+            for k in range(new_shape[2]):
+
+                # the tensor is distributed over axis 1, hence offset j index appropriately 
+                iv, jv, kv = i + slabi, j + slabj, k + slabk
+
+                # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
+                if iv >= global_shape[0]/2:
+                    iv -= global_shape[0]
+                if jv >= global_shape[1]/2:
+                    jv -= global_shape[1]
+                if kv >= global_shape[2]/2:
+                    kv -= global_shape[2]
+
+                kx = iv*b0[0]+jv*b1[0]+kv*b2[0] 
+                ky = iv*b0[1]+jv*b1[1]+kv*b2[1] 
+                kz = iv*b0[2]+jv*b1[2]+kv*b2[2] 
+
+                # norm of the k vector belonging to this voxel
+                knorm = math.sqrt(kx*kx + ky*ky + kz*kz)
+
+                # as the input signal is real, we need to double-count all except for the kz=0 value.
+                d3kelement = 4.*np.pi*knorm*knorm*kres
+
+                if knorm > 0.0:
+                    _pref = math.sqrt(kx*kx + ky*ky)/knorm/d3kelement
+                else:
+                    _pref = 1.0
+               
+                _psi_re = psi_k[i,j,k].real 
+                _psi_im = psi_k[i,j,k].imag
+                _int_k = _pref * (_psi_re*_psi_re + _psi_im*_psi_im)
+
+                if doublecount:
+                    if k == 0: 
+                        spectrum[int(knorm/kres)] += _int_k
+                    else:
+                        spectrum[int(knorm/kres)] += 2*_int_k
+                else:
+                    spectrum[int(knorm/kres)] += _int_k 
     return 0
 
  
@@ -334,9 +446,9 @@ def jSOAS_voxel(kernel, xyz, iacell, rho, global_shape, slabindex):
         jz = int(zz)
 
         # ignore atoms that lie beyond a few slices outside the distributed domain
-        lx = jx%nx_global - slabindex # now this is within 1st periodic replica
-        if lx > nx+3 or lx < -3:
-            continue
+        #lx = jx%nx_global - slabindex # now this is within 1st periodic replica
+        #if lx > nx+3 or lx < -3:
+        #    continue
 
         # now find which fine kernel voxel the atom sits in.
         ix = int((xx - jx)*nfine)  # xx = 12.3456 -> ix=3   (for NFINE = 10)
@@ -346,7 +458,8 @@ def jSOAS_voxel(kernel, xyz, iacell, rho, global_shape, slabindex):
         # now can add kernel
         for kx in range(-1,3):
             lx = (jx + kx)%nx_global - slabindex # now this is within 1st periodic replica
-            if lx < 0 or lx >= nx:
+            
+            if lx < 0 or lx >= nx: # only consider voxels inside the local slice 
                 continue
 
             for ky in range(-1,3):
