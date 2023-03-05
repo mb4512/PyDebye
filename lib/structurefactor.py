@@ -78,7 +78,7 @@ class StructureFactor:
         comm.barrier() 
 
 
-    def SOAS_build_structurefactor_fftw(self, fftmode="FFTW"):
+    def SOAS_build_structurefactor_fftw(self, fftmode="FFTW", padding=1):
 
         if HEAP:
             sys.stdout.flush()
@@ -90,7 +90,7 @@ class StructureFactor:
                     print ("\nTotal memory use on rank %d: %.3f GB" % (me, 1e-9*heap_status.size))
 
         # prepare dimensions of the voxel grid
-        cellnorms = np.linalg.norm(self.readfile.cmat, axis=1)
+        cellnorms = padding*np.linalg.norm(self.readfile.cmat, axis=1)
         global_shape = 1 + (cellnorms/self.dx).astype(int)
         global_shape[global_shape%2==1] += 1 # set even voxel dimensions (easier fft freq handling)
 
@@ -142,7 +142,7 @@ class StructureFactor:
 
         # create voxel smoothing kernel
         mpiprint ("Building voxel kernel...")
-        kernel, iacell = self.SOAS_kernel()
+        kernel, iacell = self.SOAS_kernel(padding)
         mpiprint ("done.\n")
 
         if HEAP:
@@ -207,7 +207,7 @@ class StructureFactor:
         newslabindex = np.r_[0, np.cumsum(newindexlist)]
 
         # construct reciprocal vectors
-        a0,a1,a2 = self.readfile.cmat        
+        a0,a1,a2 = padding*self.readfile.cmat        
         ivol = 1./np.dot(a0, np.cross(a1, a2))
         b0 = ivol * np.cross(a1, a2) 
         b1 = ivol * np.cross(a2, a0) 
@@ -219,7 +219,7 @@ class StructureFactor:
         mpiprint (b2)
 
         # set some k space resolution for binning
-        kres = np.linalg.norm(b0+b1+b2)
+        kres = .7*np.linalg.norm(b0+b1+b2)
         
         self.kmax = np.linalg.norm(global_shape[0]*b0 + global_shape[1]*b1 + global_shape[2]*b2)
         mpiprint ("maximum k norm:", self.kmax)
@@ -265,7 +265,7 @@ class StructureFactor:
         return 0
 
 
-    def SOAS_kernel(self):
+    def SOAS_kernel(self, padding):
     
         nx,ny,nz = self.global_shape 
 
@@ -276,7 +276,7 @@ class StructureFactor:
 
         # find the unit cell for the voxels and for the fine-mesh subdivision of the voxels
         # assume rows of acell are the cell vectors
-        asuper = self.readfile.cmat 
+        asuper = padding*self.readfile.cmat 
         acell = np.copy(self.readfile.cmat) 
         acell[0] = asuper[0]/nx
         acell[1] = asuper[1]/ny
