@@ -111,8 +111,17 @@ def main():
     parser.add_argument("-fm", "--fftmode", nargs="?", default="FFTW", const="all", 
                         choices=("FFTW", "SCIPY"), help="Which FFT library to use (default: %(default)s)")
 
-    parser.add_argument("-fp", "--fftpadding", type=float, default=1.0,
-                        help="Extra voxel field padding factor. Higher padding translates to better k-space resolution (default: %(default)s)")
+    parser.add_argument("-ns", "--nsobol", type=int, default=-1,
+                        help="Number of extra Sobol-generated sampling points per reciprocal unitcell. (default: automatic to resolve size broadening)") 
+
+    parser.add_argument("-nr", "--nresolution", type=int, default=10,
+                        help="Target number of k-pts per reciprocal space direction for automatic resolution of size broadening (default: %(default)s)")
+
+    # debug/testing
+    parser.add_argument("-ex", "--exxstrain", type=float, default=0.0,
+                        help="Strain to apply to simulation cell in x-direction (default: %(default)s)")
+    parser.add_argument("-eiso", "--eisostrain", type=float, default=0.0,
+                        help="Isotropic strain to apply to simulation cell (default: %(default)s)")
 
 
     # export path of final spectrum
@@ -134,12 +143,12 @@ def main():
 
     # build or import the histogram
     filedat = ReadFile(fpath, filetype=args.filetype)
-    filedat.load(shuffle = ~args.ordered)
+    filedat.load(shuffle = ~args.ordered, exx=args.exxstrain, eiso=args.eisostrain)
 
     if args.method == "fft":
         # fft based method
         sfac = StructureFactor(filedat, dx=args.voxelspacing) 
-        sfac.SOAS_build_structurefactor_fftw(fftmode=args.fftmode, padding=args.fftpadding)
+        sfac.SOAS_build_structurefactor_fftw(fftmode=args.fftmode, nsobol=args.nsobol, nres=args.nresolution)
         spectrum = sfac.spectrum
 
     elif args.method == "real":

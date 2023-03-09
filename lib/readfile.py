@@ -33,7 +33,7 @@ class ReadFile:
         self.fpath = fpath
         self.filetype = filetype
         
-    def load(self, shuffle=False):
+    def load(self, shuffle=False, exx=0.0, eiso=0.0):
 
         # histogram files are handled specially
         if self.filetype == "hist":
@@ -88,6 +88,16 @@ class ReadFile:
         self.cmat   = comm.bcast(self.cmat, root=0)
         self.natoms = comm.bcast(self.natoms, root=0)
         self.ortho  = comm.bcast(self.ortho, root=0)
+
+        if np.abs(exx) > 0.0:
+            mpiprint ("applying a strain of %d along x-direction." % exx)
+            self.xyz[:,0] *= 1.+exx
+            self.cmat[:,0] *= 1+exx
+
+        if np.abs(eiso) > 0.0:
+            mpiprint ("applying an isotropic strain of %d." % eiso)
+            self.xyz *= 1.+eiso
+            self.cmat *= 1+eiso
 
         mpiprint ("Imported %d atoms from %s file: %s" % (self.natoms, self.filetype, self.fpath))
         mpiprint ()

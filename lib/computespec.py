@@ -516,7 +516,7 @@ class ComputeSpectrum:
         comm.Gatherv(sendbuf=_spectrum, recvbuf=(spectrum, sendcounts), root=0)
 
         if (me == 0):
-            spectrum = natoms + 2.*spectrum
+            #spectrum = natoms + 2.*spectrum
             output = np.c_[srange, spectrum]
         else:
             output = None
