@@ -161,12 +161,14 @@ class StructureFactor:
 
         # create voxel smoothing kernel
         mpiprint ("Building voxel kernel... ", end="")
-        kernel, iacell = self.SOAS_kernel()
+        #kernel, iacell = self.SOAS_kernel()
+        kernel, iacell = self.SOAS_kernel(tri=True)
         mpiprint ("done.")
 
         # populate voxel tensor with atomic densities
         mpiprint ("Compiling voxelisation routine... ", end="")
-        jSOAS_voxel(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
+        #jSOAS_voxel(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
+        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
         mpiprint ("done.")
 
         # histogram for binning k-points over all k-directions 
@@ -209,7 +211,7 @@ class StructureFactor:
 
             clock = time.time()
             mpiprint ("Voxelising... ", end="")
-            jSOAS_voxel(kernel, self.readfile.xyz, iacell, self.uvox, global_shape, slabindex[me])
+            jSOAS_voxel_tri(kernel, self.readfile.xyz, iacell, self.uvox, global_shape, slabindex[me])
             mpiprint ("done.")
             clock = time.time() - clock
 
@@ -311,13 +313,15 @@ class StructureFactor:
         return 0
 
 
-    def SOAS_kernel(self):
+    def SOAS_kernel(self, tri=False):
     
         nx,ny,nz = self.global_shape 
 
         nfine = 10
         infine = 1./nfine
 
+        if tri:
+            nfine += 1
         kernel = np.zeros((nfine,nfine,nfine, 4,4,4))
 
         # find the unit cell for the voxels and for the fine-mesh subdivision of the voxels
@@ -339,16 +343,26 @@ class StructureFactor:
         # construct the kernel
         i2s2 = 1./(2.*sigma*sigma) 
 
+
         for ix in range(nfine):
+            ixv = ix
             for iy in range(nfine):
+                iyv = iy
                 for iz in range(nfine):
+                    izv = iz
+
+                    # if no trilinear interpolation, assume atom is in centre of fine voxel mesh 
+                    if not tri:
+                        ixv += 0.5
+                        iyv += 0.5
+                        izv += 0.5
+
                     # construct position of point in fine cell
-                    xx = afine[0,0]*(ix+.5) + afine[1,0]*(iy+.5) + afine[2,0]*(iz+.5)
-                    yy = afine[0,1]*(ix+.5) + afine[1,1]*(iy+.5) + afine[2,1]*(iz+.5)
-                    zz = afine[0,2]*(ix+.5) + afine[1,2]*(iy+.5) + afine[2,2]*(iz+.5)
+                    xx = afine[0,0]*ixv + afine[1,0]*iyv + afine[2,0]*izv
+                    yy = afine[0,1]*ixv + afine[1,1]*iyv + afine[2,1]*izv
+                    zz = afine[0,2]*ixv + afine[1,2]*iyv + afine[2,2]*izv
 
                     ddsum = 0.0
-
                     for jx in range(-1,3):
                         for jy in range(-1,3):
                             for jz in range(-1,3):
@@ -438,7 +452,70 @@ def jSOAS_spectrum_inplace(spectrum, counts, kres, b0, b1, b2, kshift, psi_k, ne
                 counts[int(knorm/kres)] +=  1
     return 0
 
+@jit(nopython=True, fastmath=True)
+def jSOAS_voxel_tri(kernel, xyz, iacell, rho, global_shape, slabindex):
+
+    nx_global,ny_global,nz_global = global_shape
+    nx,ny,nz = rho.shape # shape of distributed tensor 
  
+    natoms = len(xyz)
+    nfine = 10
+
+    kernel_linint = np.zeros((4,4,4), dtype=float) 
+
+    # loop through each atom    
+    rho *= 0        
+    for ii in range(natoms):
+        # find the position of the atom in global voxel space
+        # should be 0:nx_global-1 etc., but the atom may be outside the periodic supercell bounds. Will fix below
+        xx = iacell[0,0]*xyz[ii,0] + iacell[1,0]*xyz[ii,1] + iacell[2,0]*xyz[ii,2]
+        yy = iacell[0,1]*xyz[ii,1] + iacell[1,1]*xyz[ii,1] + iacell[2,1]*xyz[ii,2]
+        zz = iacell[0,2]*xyz[ii,2] + iacell[1,2]*xyz[ii,1] + iacell[2,2]*xyz[ii,2]
+
+        # find which global voxel the atom sits in. Note: haven't yet made sure this cell is within range...
+        jx = int(xx) # int acts as floor, eg xx = 12.3456 -> jx = 12
+        jy = int(yy)
+        jz = int(zz)
+
+        # ignore atoms that lie beyond a few slices outside the distributed domain
+        #lx = jx%nx_global - slabindex # now this is within 1st periodic replica
+        #if lx > nx+3 or lx < -3:
+        #    continue
+
+        # now find which fine kernel voxel the atom sits in.
+        ix = int((xx - jx)*nfine)  # xx = 12.3456 -> ix=3   (for NFINE = 10)
+        iy = int((yy - jy)*nfine) 
+        iz = int((zz - jz)*nfine) 
+
+        # find the weighting on each and construct a tri-linear interpolation of the kernel
+        xx = (xx - jx)*nfine - ix  # xx = 12.3456 -> xx = 0.456
+        yy = (yy - jy)*nfine - iy
+        zz = (zz - jz)*nfine - iz
+
+        kernel_linint[:,:,:] = kernel[ix  ,iy  ,iz  ]*(1-xx)*(1-yy)*(1-zz) +\
+                               kernel[ix+1,iy  ,iz  ]*(  xx)*(1-yy)*(1-zz) +\
+                               kernel[ix  ,iy+1,iz  ]*(1-xx)*(  yy)*(1-zz) +\
+                               kernel[ix+1,iy+1,iz  ]*(  xx)*(  yy)*(1-zz) +\
+                               kernel[ix  ,iy  ,iz+1]*(1-xx)*(1-yy)*(  zz) +\
+                               kernel[ix+1,iy  ,iz+1]*(  xx)*(1-yy)*(  zz) +\
+                               kernel[ix  ,iy+1,iz+1]*(1-xx)*(  yy)*(  zz) +\
+                               kernel[ix+1,iy+1,iz+1]*(  xx)*(  yy)*(  zz)
+
+        # now can add kernel
+        for kx in range(-1,3):
+            lx = (jx + kx)%nx_global - slabindex # now this is within 1st periodic replica
+            
+            if lx < 0 or lx >= nx: # only consider voxels inside the local slice 
+                continue
+
+            for ky in range(-1,3):
+                ly = (jy + ky)%ny_global
+                for kz in range(-1,3):
+                    lz = (jz + kz)%nz_global
+
+                    rho[lx,ly,lz] += kernel_linint[1+kx,1+ky,1+kz]
+
+    return 0
 @jit(nopython=True, fastmath=True)
 def jSOAS_voxel(kernel, xyz, iacell, rho, global_shape, slabindex):
 
