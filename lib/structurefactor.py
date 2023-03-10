@@ -110,6 +110,8 @@ class StructureFactor:
             npts = nres*nres*nres                  # target number of kpts inside broadened peak
             vol = 1/ivol                           # volume of simulation cell (=inverse volume of a reciprocal cell) 
             nsobol = 1+int(npts/(vol*(2*delk)**3))
+
+            # set k space resolution for binning
             kres = np.linalg.norm(b0+b1+b2)/nres
             mpiprint ("%d points with a k-resolution of %f.\n" % (nsobol, kres))
         else:
@@ -129,10 +131,6 @@ class StructureFactor:
             fshifts = np.r_[[[0.,0.,0.]]]
             mpiprint ("No subsampling enabled, using one k-point per reciprocal unit cell.\n")
 
-        # set some k space resolution for binning
-        #kres = 0.7*np.linalg.norm(b0+b1+b2)*np.power(nsobol, -1/3.)
-        #kres = 0.00095047523 
- 
         self.kmax = np.linalg.norm(global_shape[0]*b0 + global_shape[1]*b1 + global_shape[2]*b2)
         mpiprint ("Maximum k norm:", self.kmax)
         mpiprint ()
@@ -161,14 +159,25 @@ class StructureFactor:
 
         # create voxel smoothing kernel
         mpiprint ("Building voxel kernel... ", end="")
-        #kernel, iacell = self.SOAS_kernel()
         kernel, iacell = self.SOAS_kernel(tri=True)
         mpiprint ("done.")
 
+        # transform atom xyz coordinates to voxel space
+        mpiprint ("Compiling xyz to voxel coordinates routine... ", end="")
+        jSOAS_xyz_to_voxel(np.ones((5,3), dtype=float), iacell) # compile
+        mpiprint ("done.")
+        jSOAS_xyz_to_voxel(self.readfile.xyz, iacell)
+
+        # remove atoms that lie outside the local slab region plus a skin of 3 voxels
+        _looped = (self.readfile.xyz[:,0]%global_shape[0])  # loop back into periodic box
+        _dskin = 3
+        _bool = (_looped >= slabindex[me]-_dskin)*(_looped <= slabindex[me]+myshape[0]+_dskin)
+        self.readfile.xyz = self.readfile.xyz[_bool]
+
         # populate voxel tensor with atomic densities
         mpiprint ("Compiling voxelisation routine... ", end="")
-        #jSOAS_voxel(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
-        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], iacell, self.uvox, global_shape, slabindex[me])
+        #jSOAS_voxel(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me])
+        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me])
         mpiprint ("done.")
 
         # histogram for binning k-points over all k-directions 
@@ -211,7 +220,7 @@ class StructureFactor:
 
             clock = time.time()
             mpiprint ("Voxelising... ", end="")
-            jSOAS_voxel_tri(kernel, self.readfile.xyz, iacell, self.uvox, global_shape, slabindex[me])
+            jSOAS_voxel_tri(kernel, self.readfile.xyz, self.uvox, global_shape, slabindex[me])
             mpiprint ("done.")
             clock = time.time() - clock
 
@@ -453,12 +462,29 @@ def jSOAS_spectrum_inplace(spectrum, counts, kres, b0, b1, b2, kshift, psi_k, ne
     return 0
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_voxel_tri(kernel, xyz, iacell, rho, global_shape, slabindex):
+def jSOAS_xyz_to_voxel(xyz, iacell):
+
+    natoms = len(xyz)
+
+    # loop through each atom    
+    for ii in range(natoms):
+        # find the position of the atom in global voxel space
+        # should be 0:nx_global-1 etc., but the atom may be outside the periodic supercell bounds. Will fix below
+        xx = iacell[0,0]*xyz[ii,0] + iacell[1,0]*xyz[ii,1] + iacell[2,0]*xyz[ii,2]
+        yy = iacell[0,1]*xyz[ii,1] + iacell[1,1]*xyz[ii,1] + iacell[2,1]*xyz[ii,2]
+        zz = iacell[0,2]*xyz[ii,2] + iacell[1,2]*xyz[ii,1] + iacell[2,2]*xyz[ii,2]
+        xyz[ii,0] = xx
+        xyz[ii,1] = yy
+        xyz[ii,2] = zz
+
+
+@jit(nopython=True, fastmath=True)
+def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
 
     nx_global,ny_global,nz_global = global_shape
     nx,ny,nz = rho.shape # shape of distributed tensor 
  
-    natoms = len(xyz)
+    natoms = len(xxyyzz)
     nfine = 10
 
     kernel_linint = np.zeros((4,4,4), dtype=float) 
@@ -466,21 +492,12 @@ def jSOAS_voxel_tri(kernel, xyz, iacell, rho, global_shape, slabindex):
     # loop through each atom    
     rho *= 0        
     for ii in range(natoms):
-        # find the position of the atom in global voxel space
-        # should be 0:nx_global-1 etc., but the atom may be outside the periodic supercell bounds. Will fix below
-        xx = iacell[0,0]*xyz[ii,0] + iacell[1,0]*xyz[ii,1] + iacell[2,0]*xyz[ii,2]
-        yy = iacell[0,1]*xyz[ii,1] + iacell[1,1]*xyz[ii,1] + iacell[2,1]*xyz[ii,2]
-        zz = iacell[0,2]*xyz[ii,2] + iacell[1,2]*xyz[ii,1] + iacell[2,2]*xyz[ii,2]
+        xx,yy,zz = xxyyzz[ii] 
 
         # find which global voxel the atom sits in. Note: haven't yet made sure this cell is within range...
         jx = int(xx) # int acts as floor, eg xx = 12.3456 -> jx = 12
         jy = int(yy)
         jz = int(zz)
-
-        # ignore atoms that lie beyond a few slices outside the distributed domain
-        #lx = jx%nx_global - slabindex # now this is within 1st periodic replica
-        #if lx > nx+3 or lx < -3:
-        #    continue
 
         # now find which fine kernel voxel the atom sits in.
         ix = int((xx - jx)*nfine)  # xx = 12.3456 -> ix=3   (for NFINE = 10)
@@ -516,33 +533,25 @@ def jSOAS_voxel_tri(kernel, xyz, iacell, rho, global_shape, slabindex):
                     rho[lx,ly,lz] += kernel_linint[1+kx,1+ky,1+kz]
 
     return 0
+
 @jit(nopython=True, fastmath=True)
-def jSOAS_voxel(kernel, xyz, iacell, rho, global_shape, slabindex):
+def jSOAS_voxel(kernel, xxyyzz, rho, global_shape, slabindex):
 
     nx_global,ny_global,nz_global = global_shape
     nx,ny,nz = rho.shape # shape of distributed tensor 
  
-    natoms = len(xyz)
+    natoms = len(xxyyzz)
     nfine = 10
 
     # loop through each atom    
     rho *= 0        
     for ii in range(natoms):
-        # find the position of the atom in global voxel space
-        # should be 0:nx_global-1 etc., but the atom may be outside the periodic supercell bounds. Will fix below
-        xx = iacell[0,0]*xyz[ii,0] + iacell[1,0]*xyz[ii,1] + iacell[2,0]*xyz[ii,2]
-        yy = iacell[0,1]*xyz[ii,1] + iacell[1,1]*xyz[ii,1] + iacell[2,1]*xyz[ii,2]
-        zz = iacell[0,2]*xyz[ii,2] + iacell[1,2]*xyz[ii,1] + iacell[2,2]*xyz[ii,2]
+        xx,yy,zz = xxyyzz[ii] 
 
         # find which global voxel the atom sits in. Note: haven't yet made sure this cell is within range...
         jx = int(xx) # eg xx = 12.3456 -> jx = 12
         jy = int(yy)
         jz = int(zz)
-
-        # ignore atoms that lie beyond a few slices outside the distributed domain
-        #lx = jx%nx_global - slabindex # now this is within 1st periodic replica
-        #if lx > nx+3 or lx < -3:
-        #    continue
 
         # now find which fine kernel voxel the atom sits in.
         ix = int((xx - jx)*nfine)  # xx = 12.3456 -> ix=3   (for NFINE = 10)
