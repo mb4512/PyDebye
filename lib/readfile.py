@@ -90,11 +90,21 @@ class ReadFile:
         self.ortho  = comm.bcast(self.ortho, root=0)
 
         if np.abs(exx) > 0.0:
+            self.cmat[0,0] += 10.0 # zero-pad to keep voxel dimensions fixed
+            self.cmat[1,1] += 10.0
+            self.cmat[2,2] += 10.0
+            self.xyz += 5.0        # move atoms to centre
+
             mpiprint ("applying a strain of %d along x-direction." % exx)
             self.xyz[:,0] *= 1.+exx
-            self.cmat[:,0] *= 1+exx
+            #self.cmat[:,0] *= 1+exx
 
         if np.abs(eiso) > 0.0:
+            self.cmat[0,0] += 10.0 # zero-pad to keep voxel dimensions fixed
+            self.cmat[1,1] += 10.0
+            self.cmat[2,2] += 10.0
+            self.xyz += 5.0        # move atoms to centre
+
             mpiprint ("applying an isotropic strain of %d." % eiso)
             self.xyz *= 1.+eiso
             self.cmat *= 1+eiso
