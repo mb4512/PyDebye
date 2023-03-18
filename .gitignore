@@ -1,0 +1,9 @@
+__pycache__/
+*.spec
+*.hist
+*.out
+*.pyc
+*.nbc
+*.nbi
+*.dat
+*.sh
