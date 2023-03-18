@@ -139,7 +139,7 @@ def main():
     try:
         _path = fpath.resolve(strict=True)
     except FileNotFoundError:
-        pass 
+        pass
 
     # build or import the histogram
     filedat = ReadFile(fpath, filetype=args.filetype)
@@ -147,8 +147,8 @@ def main():
 
     if args.method == "fft":
         # fft based method
-        sfac = StructureFactor(filedat, dx=args.voxelspacing) 
-        sfac.SOAS_build_structurefactor_fftw(fftmode=args.fftmode, nsobol=args.nsobol, nres=args.nresolution)
+        sfac = StructureFactor(filedat, dx=args.voxelspacing, fftmode=args.fftmode) 
+        sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution)
         spectrum = sfac.spectrum
 
     elif args.method == "real":

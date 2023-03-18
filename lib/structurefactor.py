@@ -2,6 +2,8 @@ import sys, time, math, cmath
 import numpy as np
 from numba import jit
 
+from lib.distarray import DistributedTensor
+
 import scipy.stats
 import scipy.fft
 
@@ -10,7 +12,7 @@ try:
     from mpi4py_fft import PFFT, newDistArray, DistArray
     IMPORTED = "successful"
 except ImportError:
-    IMPORTED = ImportError("Could not load mpi4py_fft library. Is it installed?")
+    IMPORTED = ImportError("FFTW mode was set but could not load mpi4py_fft library. Is it installed?")
 
 # template to replace MPI functionality for single threaded use
 class MPI_to_serial():
@@ -39,43 +41,27 @@ def mpiprint(*arg, **kwargs):
     return 0
 
 
-#@jit(nopython=True, cache=True, fastmath=True)
-@jit(nopython=True, fastmath=True)
-def jpbc_wrap(xyz, box):
-    '''Wraps xyz coordinates back into periodic box so KDTree with PBC on does not complain.'''
-    for i in range(len(xyz)): 
-        xyz[i] = xyz[i]-box*np.floor(xyz[i]/box)
-
-
 class StructureFactor:
-    def __init__(self, readfile, pbc=False, precision="double", dx=0.3):
+    def __init__(self, readfile, dx=0.3, fftmode="SCIPY"):
 
-        # check if library available
-        if IMPORTED != "successful":
+        # complain if mpi4py-fft mode was enabled but library could not be imported 
+        if IMPORTED != "successful" and fftmode == "FFTW":
             raise IMPORTED
 
         # store reference to readfile instance
-        self.readfile = readfile 
- 
-        # if pbc, wrap atoms back into box
-        if pbc:
-            mpiprint ("Rewrapping atoms back into periodic box... ", end="")
-            # compile first with small test set, then rewrap all atoms
-            ncomp = min([10,self.readfile.natoms])
-            jpbc_wrap(self.readfile.xyz[:ncomp], self.readfile.box) 
-            jpbc_wrap(self.readfile.xyz, self.readfile.box) 
+        self.readfile = readfile
 
-        comm.barrier()
-        mpiprint ("done.\n")
-       
-        self.dx = dx # voxel spacing in Angstrom 
-        self.pbc = pbc
+        self.dx = dx 
+        self.fftmode = fftmode
 
         mpiprint ("Constructing voxel field with dx=%.3f voxel spacing and computing FFT.\n" % self.dx)
 
-        comm.barrier() 
+    def SOAS_build_structurefactor_fftw(self, nsobol=-1, nres=10):
 
-    def SOAS_build_structurefactor_fftw(self, fftmode="FFTW", nsobol=-1, nres=10):
+        fftmode = self.fftmode
+
+        clock_complete = time.time()
+        clock_startup = time.time()
 
         # prepare dimensions of the voxel grid
         cellnorms = np.linalg.norm(self.readfile.cmat, axis=1)
@@ -119,7 +105,7 @@ class StructureFactor:
  
         if nsobol > 0:
             mpiprint ("Subsampling each reciprocal unit cell with %d Sobol-generated k-points." % nsobol)
-            sampler = scipy.stats.qmc.Sobol(3, seed=59210939)
+            sampler = scipy.stats.qmc.Sobol(3, seed=59210939) # fixed seed for reproducibility
             if (me == 0):
                 fshifts = sampler.random(nsobol) # shifts in fractional coordinates w.r.t reciprocal unit cell
             else:
@@ -136,7 +122,7 @@ class StructureFactor:
         mpiprint ()
 
         # initialise distributed tensor on all cores in slab distribution: 
-        # the 1st axis of the tensor is distributed among the cores 
+        # the first axis of the tensor is distributed over all MPI processes 
         if fftmode == "FFTW":
             mpiprint ("Constructing FFTW plan... ", end="")
             fft = PFFT(MPI.COMM_WORLD, self.global_shape, axes=(0, 1, 2), dtype=complex, grid=(-1,))
@@ -144,15 +130,14 @@ class StructureFactor:
             mpiprint ("done.")
 
         elif fftmode == "SCIPY":
-            self.uvox = DistArray(global_shape, [0, 1, 1], dtype=complex)
-            self.uvox[:] *= 0.0
-
+            uvoxdist = DistributedTensor(global_shape, distaxis=0, value=0.0, numpytype=complex)
+            self.uvox = uvoxdist.array
 
         # gather the slab thicknesses into one list
         myshape = self.uvox.shape
         indexlist = comm.allgather(myshape[0])
         mpiprint ("Voxel grid is distributed into slabs along axis 0 of length:", indexlist)
-        mpiprint ()       
+        mpiprint () 
  
         # list of voxel slab indices to be constructed by each thread 
         slabindex = np.r_[0, np.cumsum(indexlist)]
@@ -164,35 +149,35 @@ class StructureFactor:
 
         # transform atom xyz coordinates to voxel space
         mpiprint ("Compiling xyz to voxel coordinates routine... ", end="")
-        jSOAS_xyz_to_voxel(np.ones((5,3), dtype=float), iacell) # compile
+        jSOAS_xyz_to_voxel(np.ones((5,3), dtype=float), iacell) # compile first
         mpiprint ("done.")
-        jSOAS_xyz_to_voxel(self.readfile.xyz, iacell)
+        jSOAS_xyz_to_voxel(self.readfile.xyz, iacell) # transform
 
-        # remove atoms that lie outside the local slab region plus a skin of 3 voxels
-        _looped = (self.readfile.xyz[:,0]%global_shape[0])  # loop back into periodic box
+        # domain decomposition for atoms, so voxelisation complexity scales linearly with number of atoms
+        # loop atoms back into periodic box
+        _looped = (self.readfile.xyz[:,0]%global_shape[0])
+
+        # remove atoms that lie outside the local slab region plus a skin of 3 voxels
         _dskin = 3
         _bool = (_looped >= slabindex[me]-_dskin)*(_looped <= slabindex[me]+myshape[0]+_dskin)
         self.readfile.xyz = self.readfile.xyz[_bool]
 
-        # populate voxel tensor with atomic densities
         mpiprint ("Compiling voxelisation routine... ", end="")
-        #jSOAS_voxel(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me])
-        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me])
+        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me]) # compile first
         mpiprint ("done.")
 
-        # histogram for binning k-points over all k-directions 
+        # prepare histogram for binning k-points over all k-directions 
         _spectrum = np.zeros(int(self.kmax/kres)+1)
         _counts = np.zeros(int(self.kmax/kres)+1, dtype=int)
 
         mpiprint ("Compiling binning routine... ", end="")
-        _slice = self.uvox[:min(3, myshape[0]), :min(3, myshape[1]), :min(3, myshape[2])]
+        _psi_k = np.ones((10,10,10), dtype=complex)
         kshift = np.r_[0.,0.,0.]
-        
-        jSOAS_spectrum_inplace(_spectrum, _counts, kres, b0, b1, b2, kshift, _slice, myshape, global_shape, 0, 0, 0) 
-        _spectrum *= 0
+        jSOAS_spectrum_inplace(_spectrum, _counts, kres, b0, b1, b2, kshift, _psi_k, myshape, global_shape, 0, 0, 0) 
+        _spectrum[:] = 0.0
         _counts *= 0
         mpiprint ("done.")
-
+        
         if nsobol > 0:
             # get voxel mesh basis set
             nx,ny,nz = global_shape 
@@ -206,17 +191,25 @@ class StructureFactor:
             jSOAS_modulate_voxels(self.uvox, kshift, self.uvox.shape, global_shape, acell[0], acell[1], acell[2], slabindex[me])
             mpiprint ("done.")
 
+        clock_startup = time.time() - clock_startup
+        mpiprint ("Completed start-up process in %.3f seconds." % clock_startup)
 
+        clock_sobol = 0
         for _isobol,_fshift in enumerate(fshifts):
-
-            if _isobol > 0:
-                # realign along axis=2
-                self.uvox = self.uvox.redistribute(2)
+            clock_tot = time.time()
 
             if nsobol > 0:
                 mpiprint ("\n==============================================")
                 mpiprint ("Sampling k-point number %d out of %d." % (1+_isobol, len(fshifts))) 
                 mpiprint ("==============================================\n")
+
+            # reinitialise tensor distributed along first axis 
+            if _isobol > 0:
+                if fftmode == "FFTW":
+                    self.uvox = newDistArray(fft, False)
+                else:
+                    uvoxdist = DistributedTensor(global_shape, distaxis=0, value=0.0, numpytype=complex)
+                    self.uvox = uvoxdist.array
 
             clock = time.time()
             mpiprint ("Voxelising... ", end="")
@@ -232,7 +225,6 @@ class StructureFactor:
                 if _isobol > 0:
                     # get k-point coordinates in reciprocal space from fractional coordinates
                     kshift = b0*_fshift[0] + b1*_fshift[1] + b2*_fshift[2]
-                    #jSOAS_modulate_voxels(self.uvox, kshift, self.uvox.shape, global_shape, acell[0], acell[1], acell[2], slabindex[me])
                     jSOAS_modulate_voxels(self.uvox, _fshift, self.uvox.shape, global_shape, acell[0], acell[1], acell[2], slabindex[me])
                 else:
                     kshift = np.r_[0.,0.,0.]
@@ -244,19 +236,22 @@ class StructureFactor:
             if fftmode == "FFTW":
                 mpiprint ("Applying FFT... ", end="")
                 self.uvox = fft.forward(self.uvox)
+                # normalise
+                self.uvox *= nvox
+
             elif fftmode == "SCIPY":
                 mpiprint ("Doing scipy complex FFT along axis 2... ", end="")
                 self.uvox[:] = scipy.fft.fft(self.uvox, axis=2, norm="backward")
 
-                #mpiprint ("Doing scipy complex FFT along axis 1...")
-                mpiprint ("along axis 1... ", end="")
+                mpiprint ("FFT along axis 1... ", end="")
                 self.uvox[:] = scipy.fft.fft(self.uvox, axis=1, norm="backward")
                 
-                # align along axis=0
-                self.uvox = self.uvox.redistribute(0)
+                # align along first axis for FFT along first axis 
+                mpiprint ("aligning tensor along axis 0... ", end="")
+                uvoxdist.redistribute(-1)
+                self.uvox = uvoxdist.array
 
-                #mpiprint ("Doing scipy complex FFT along axis 0...")
-                mpiprint ("along axis 0... ", end="")
+                mpiprint ("FFT along axis 0... ", end="")
                 self.uvox[:] = scipy.fft.fft(self.uvox, axis=0, norm="backward")
             
             mpiprint ("done.")
@@ -268,7 +263,7 @@ class StructureFactor:
             # define diffraction intensity
             newshape = self.uvox.shape
 
-            # note: after the transformation, the tensor is distributed along a different axis
+            # after the transformation, the tensor is distributed along a different axis depending on the method
             if fftmode == "FFTW":
                 newindexlist = comm.allgather(newshape[1]) # fftw version
             elif fftmode == "SCIPY":
@@ -289,18 +284,20 @@ class StructureFactor:
 
             mpiprint ("Binned all k-points in %.3f seconds." % clock, end= " ")
             mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
+            
+            clock_tot = time.time() - clock_tot
+            clock_sobol += clock_tot
+            mpiprint ("Completed subsampling iteration in %.3f seconds." % clock_tot)
 
         if nsobol > 1:
             mpiprint ("\nFinished subsampling.\n")
+            mpiprint ("Completed subsampling in %.3f seconds." % clock_sobol)
      
         # collate results from all threads into one 
         spectrum = np.zeros_like(_spectrum)
         counts = np.zeros_like(_counts)
         comm.Allreduce([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], op=MPI.SUM)
         comm.Allreduce([_counts, MPI.INT], [counts, MPI.INT], op=MPI.SUM)
-
-        # normalise
-        #spectrum *= np.product(global_shape)#/len(fshifts)
 
         # define diffraction spectrum
         krange = .5*kres + kres*np.arange(len(spectrum))    # bin mid-points
@@ -317,6 +314,9 @@ class StructureFactor:
         spectrum[counts>0] *= 1/counts[counts>0]            
 
         self.spectrum = np.c_[krange, spectrum, counts]
+        
+        clock_complete = time.time() - clock_complete
+        mpiprint ("Completed entire routine in %.3f seconds." % clock_complete)
         
         comm.barrier()
         return 0
@@ -351,7 +351,6 @@ class StructureFactor:
 
         # construct the kernel
         i2s2 = 1./(2.*sigma*sigma) 
-
 
         for ix in range(nfine):
             ixv = ix
@@ -402,15 +401,13 @@ class StructureFactor:
 @jit(nopython=True, fastmath=True)
 def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell1, acell2, slabindex):
 
-    #'''
-    # faster algoirhtm exploiting orthonormality of lattice to reciprocal vectors
+    # faster algorithm exploiting orthonormality of lattice to reciprocal vectors
     nx,ny,nz = global_shape
     for i in range(local_shape[0]):
         iv = i + slabindex
         for j in range(local_shape[1]): 
             for k in range(local_shape[2]):
                 uvox[i,j,k] *= cmath.exp(2j*np.pi*(iv/nx*kshift[0] + j/ny*kshift[1] + k/nz*kshift[2]))
-    #'''
 
     '''
     for i in range(local_shape[0]):
@@ -430,12 +427,13 @@ def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell
 def jSOAS_spectrum_inplace(spectrum, counts, kres, b0, b1, b2, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
 
     # bin diffraction intensity over all k-directions
-    for i in range(new_shape[0]): 
-        for j in range(new_shape[1]): 
+    for i in range(new_shape[0]):
+        # offset i,j,k depending on how the tensor is distributed
+        iv = i + slabi
+        for j in range(new_shape[1]):
+            jv = j + slabj
             for k in range(new_shape[2]):
-
-                # the tensor is distributed over axis 1, hence offset j index appropriately 
-                iv, jv, kv = i + slabi, j + slabj, k + slabk
+                kv = k + slabk
 
                 # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
                 if iv >= global_shape[0]/2:
@@ -569,7 +567,6 @@ def jSOAS_voxel(kernel, xxyyzz, rho, global_shape, slabindex):
                 ly = (jy + ky)%ny_global
                 for kz in range(-1,3):
                     lz = (jz + kz)%nz_global
-
                     rho[lx,ly,lz] += kernel[ix,iy,iz, 1+kx,1+ky,1+kz]
 
     return 0
