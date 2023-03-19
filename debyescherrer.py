@@ -119,9 +119,15 @@ def main():
 
     # debug/testing
     parser.add_argument("-ex", "--exxstrain", type=float, default=0.0,
-                        help="Strain to apply to simulation cell in x-direction (default: %(default)s)")
+                        help="DEBUG: Strain to apply to simulation cell in x-direction (default: %(default)s)")
     parser.add_argument("-eiso", "--eisostrain", type=float, default=0.0,
-                        help="Isotropic strain to apply to simulation cell (default: %(default)s)")
+                        help="DEBUG: Isotropic strain to apply to simulation cell (default: %(default)s)")
+    parser.add_argument("-ediff", "--exportdiffraction", default="False",
+                        help="DEBUG: export path of diffraction pattern for FFT mode (default: %(default)s)")
+    parser.add_argument("-ekmin", "--exportkmin", type=float, default=0.2,
+                        help="DEBUG: minimum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
+    parser.add_argument("-ekmax", "--exportkmax", type=float, default=0.7,
+                        help="DEBUG: maximum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
 
 
     # export path of final spectrum
@@ -133,6 +139,9 @@ def main():
     # use numpy inf for consistency 
     if args.rcut == float("inf"):
         args.rcut = np.inf
+
+    if args.exportdiffraction == "False":
+        args.exportdiffraction = False
 
     # check if input file exists
     fpath = Path(args.inputfile)
@@ -148,7 +157,7 @@ def main():
     if args.method == "fft":
         # fft based method
         sfac = StructureFactor(filedat, dx=args.voxelspacing, fftmode=args.fftmode) 
-        sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution)
+        sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution, dexport=args.exportdiffraction, dkmin=args.exportkmin, dkmax=args.exportkmax)
         spectrum = sfac.spectrum
 
     elif args.method == "real":

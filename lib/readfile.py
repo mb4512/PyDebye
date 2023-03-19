@@ -55,6 +55,8 @@ class ReadFile:
 
             mpiprint ("Imported %d bins from %s file: %s" % (len(self.histogram), self.filetype, self.fpath))
             mpiprint ()
+
+            # exit early since no data needs to be distributed to other threads 
             return 0
 
 
@@ -82,13 +84,14 @@ class ReadFile:
             self.cmat = None
         comm.barrier()
         
-        # import data is copied to all other threads
+        # imported data is copied to all other threads
         self.xyz    = comm.bcast(self.xyz, root=0)
         self.box    = comm.bcast(self.box, root=0)
         self.cmat   = comm.bcast(self.cmat, root=0)
         self.natoms = comm.bcast(self.natoms, root=0)
         self.ortho  = comm.bcast(self.ortho, root=0)
 
+        # for debugging: possibility to add uniaxial or isotropic strains
         if np.abs(exx) > 0.0:
             self.cmat[0,0] += 10.0 # zero-pad to keep voxel dimensions fixed
             self.cmat[1,1] += 10.0
@@ -97,7 +100,6 @@ class ReadFile:
 
             mpiprint ("applying a strain of %d along x-direction." % exx)
             self.xyz[:,0] *= 1.+exx
-            #self.cmat[:,0] *= 1+exx
 
         if np.abs(eiso) > 0.0:
             self.cmat[0,0] += 10.0 # zero-pad to keep voxel dimensions fixed
@@ -171,6 +173,7 @@ class ReadFile:
 
     
     def read_data(self, fpath):
+        # currently only supports orthogonal boxes
         with open(fpath, 'r') as _dfile:
             _dfile.readline()
             _dfile.readline()

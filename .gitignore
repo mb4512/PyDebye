@@ -1,4 +1,6 @@
 __pycache__/
+*.swp
+*.xyz
 *.spec
 *.hist
 *.out

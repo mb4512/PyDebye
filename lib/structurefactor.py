@@ -56,7 +56,37 @@ class StructureFactor:
 
         mpiprint ("Constructing voxel field with dx=%.3f voxel spacing and computing FFT.\n" % self.dx)
 
-    def SOAS_build_structurefactor_fftw(self, nsobol=-1, nres=10):
+    def construct_basis_sets(self, cmat, global_shape):
+
+        # note we use row convention: c0 = cmat[0], c1 = cmat[1], c2 = cmat[3]
+
+        # copy supercell vectors from input
+        self.asuper = np.copy(cmat)
+    
+        # volume and inverse volume
+        self.vol = np.linalg.det(self.asuper)
+        self.ivol = 1./self.vol
+
+        # reciprocal basis set (k-pts basis set)
+        # note definition (shown here in column convention): [b1 b2 b3]^T = [c1 c2 c3]^-1
+        self.bmat = np.linalg.inv(self.asuper).T 
+
+        # voxel cell basis set 
+        self.acell = np.copy(cmat)
+        self.acell[0] *= 1./global_shape[0]
+        self.acell[1] *= 1./global_shape[1]
+        self.acell[2] *= 1./global_shape[2]
+
+        # inverse voxel cell (for reduced coordinates in voxel space)
+        self.iacell = np.linalg.inv(self.acell) 
+   
+        return 0
+ 
+
+    def SOAS_build_structurefactor_fftw(self, nsobol=-1, nres=10, dexport=False, dkmin=0.2, dkmax=0.7):
+
+        # catch non-sensical input
+        assert nres > 0, "-nr NRESOLUTION, --nresolution: Target number of k-pts per reciprocal space direction must be larger than 0."
 
         fftmode = self.fftmode
 
@@ -77,49 +107,44 @@ class StructureFactor:
         mpiprint ("Total tensor size: %.3f GB, per thread: %.3f GB" % (1e-9*16*nvox, 1e-9*16*nvox/nprocs)) # 16 bytes per complex num
         mpiprint ()
 
-        # construct reciprocal vectors
-        a0,a1,a2 = self.readfile.cmat        
-        ivol = 1./np.dot(a0, np.cross(a1, a2))
-        b0 = ivol * np.cross(a1, a2) 
-        b1 = ivol * np.cross(a2, a0) 
-        b2 = ivol * np.cross(a0, a1) 
+        # construct voxel and reciprocal basis sets and store them as attributes in self
+        self.construct_basis_sets(self.readfile.cmat, global_shape)
 
         mpiprint ("\nReciprocal vectors for supercell:")
-        mpiprint (b0)
-        mpiprint (b1)
-        mpiprint (b2)
+        mpiprint (self.bmat)
+        mpiprint ()
 
         # determine required number of sobol points
         if nsobol == -1:
             mpiprint ("Number of Sobol points to resolve size-broadened peak with a %d^3 k-pt grid: " % nres) 
-            delk = 6./(2.*np.pi*np.min(cellnorms)) # FWHM size broadening
+            delk = 6./(2.*np.pi*np.min(cellnorms)) # FWHM size broadening along the shortest dimension
             npts = nres*nres*nres                  # target number of kpts inside broadened peak
-            vol = 1/ivol                           # volume of simulation cell (=inverse volume of a reciprocal cell) 
-            nsobol = 1+int(npts/(vol*(2*delk)**3))
+            nsobol = 1+int(npts/(self.vol*(2*delk)**3))
 
             # set k space resolution for binning
-            kres = np.linalg.norm(b0+b1+b2)/nres
+            kres = np.linalg.norm(self.bmat[0] + self.bmat[1] + self.bmat[2])/nres
             mpiprint ("%d points with a k-resolution of %f.\n" % (nsobol, kres))
         else:
-            kres = np.linalg.norm(b0+b1+b2)
+            kres = np.linalg.norm(self.bmat[0] + self.bmat[1] + self.bmat[2])
  
+        # generate construct Sobol subsampling points
+        fshifts = np.zeros((1,3))
         if nsobol > 0:
             mpiprint ("Subsampling each reciprocal unit cell with %d Sobol-generated k-points." % nsobol)
             sampler = scipy.stats.qmc.Sobol(3, seed=59210939) # fixed seed for reproducibility
             if (me == 0):
-                fshifts = sampler.random(nsobol) # shifts in fractional coordinates w.r.t reciprocal unit cell
+                sobol_fshifts = sampler.random(nsobol) # shifts in reduced coordinates in reciprocal unit cell
             else:
-                fshifts = None
+                sobol_fshifts = None
             comm.barrier()
-            fshifts = comm.bcast(fshifts, root=0)
-            fshifts = np.r_[[[0.,0.,0.]], fshifts]
+            sobol_fshifts = comm.bcast(sobol_fshifts, root=0)
+            fshifts = np.r_[fshifts, sobol_fshifts]
         else:
-            fshifts = np.r_[[[0.,0.,0.]]]
             mpiprint ("No subsampling enabled, using one k-point per reciprocal unit cell.\n")
 
-        self.kmax = np.linalg.norm(global_shape[0]*b0 + global_shape[1]*b1 + global_shape[2]*b2)
-        mpiprint ("Maximum k norm:", self.kmax)
-        mpiprint ()
+        # Estimate of maximum k norm sampled here (not accounting for FFT frequency shift) 
+        self.kmax = np.linalg.norm(global_shape[0]*self.bmat[0] + global_shape[1]*self.bmat[1] + global_shape[2]*self.bmat[2])
+        mpiprint ("Maximum k norm: {}\n".format(self.kmax))
 
         # initialise distributed tensor on all cores in slab distribution: 
         # the first axis of the tensor is distributed over all MPI processes 
@@ -136,24 +161,23 @@ class StructureFactor:
         # gather the slab thicknesses into one list
         myshape = self.uvox.shape
         indexlist = comm.allgather(myshape[0])
-        mpiprint ("Voxel grid is distributed into slabs along axis 0 of length:", indexlist)
-        mpiprint () 
+        mpiprint ("Voxel grid is distributed into slabs along axis 0 of length: {}\n".format(indexlist))
  
         # list of voxel slab indices to be constructed by each thread 
         slabindex = np.r_[0, np.cumsum(indexlist)]
 
         # create voxel smoothing kernel
         mpiprint ("Building voxel kernel... ", end="")
-        kernel, iacell = self.SOAS_kernel(tri=True)
+        kernel = self.SOAS_kernel(self.acell, tri=True)
         mpiprint ("done.")
 
         # transform atom xyz coordinates to voxel space
         mpiprint ("Compiling xyz to voxel coordinates routine... ", end="")
-        jSOAS_xyz_to_voxel(np.ones((5,3), dtype=float), iacell) # compile first
+        jSOAS_xyz_to_voxel(np.ones((5,3), dtype=float), self.iacell) # compile first
         mpiprint ("done.")
-        jSOAS_xyz_to_voxel(self.readfile.xyz, iacell) # transform
+        jSOAS_xyz_to_voxel(self.readfile.xyz, self.iacell) # transform
 
-        # domain decomposition for atoms, so voxelisation complexity scales linearly with number of atoms
+        # spatial domain decomposition for atoms, so that voxelisation complexity scales linearly with number of atoms
         # loop atoms back into periodic box
         _looped = (self.readfile.xyz[:,0]%global_shape[0])
 
@@ -172,27 +196,26 @@ class StructureFactor:
 
         mpiprint ("Compiling binning routine... ", end="")
         _psi_k = np.ones((10,10,10), dtype=complex)
-        kshift = np.r_[0.,0.,0.]
-        jSOAS_spectrum_inplace(_spectrum, _counts, kres, b0, b1, b2, kshift, _psi_k, myshape, global_shape, 0, 0, 0) 
+        kshift = np.zeros(3) 
+        jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, _psi_k, myshape, global_shape, 0, 0, 0) 
         _spectrum[:] = 0.0
         _counts *= 0
         mpiprint ("done.")
         
         if nsobol > 0:
-            # get voxel mesh basis set
-            nx,ny,nz = global_shape 
-            asuper = self.readfile.cmat 
-            acell = np.copy(self.readfile.cmat) 
-            acell[0] = asuper[0]/nx
-            acell[1] = asuper[1]/ny
-            acell[2] = asuper[2]/nz
-
             mpiprint ("Compiling complex modulation routine... ", end="")
-            jSOAS_modulate_voxels(self.uvox, kshift, self.uvox.shape, global_shape, acell[0], acell[1], acell[2], slabindex[me])
+            jSOAS_modulate_voxels(self.uvox, kshift, self.uvox.shape, global_shape, slabindex[me])
             mpiprint ("done.")
 
         clock_startup = time.time() - clock_startup
         mpiprint ("Completed start-up process in %.3f seconds." % clock_startup)
+
+        # initialise vectors for storing diffraction pattern
+        if dexport:
+            _frac = 0.01 # initial size (this is dynamically increased) 
+            kvectors = np.zeros((int(_frac*self.uvox.size), 3), dtype=float)
+            intensities = np.zeros(int(_frac*self.uvox.size), dtype=float)
+            _diffraction_pattern = [] 
 
         clock_sobol = 0
         for _isobol,_fshift in enumerate(fshifts):
@@ -219,25 +242,22 @@ class StructureFactor:
 
             mpiprint ("Populated %d voxels in %.3f seconds." % (nvox, clock), end=" ")
             mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
-
-            if nsobol > 0:
-                # 1st point is the 0,0,0 origin of reciprocal unit cell
-                if _isobol > 0:
-                    # get k-point coordinates in reciprocal space from fractional coordinates
-                    kshift = b0*_fshift[0] + b1*_fshift[1] + b2*_fshift[2]
-                    jSOAS_modulate_voxels(self.uvox, _fshift, self.uvox.shape, global_shape, acell[0], acell[1], acell[2], slabindex[me])
-                else:
-                    kshift = np.r_[0.,0.,0.]
-            else:
-                kshift = np.r_[0.,0.,0.]
+            
+            # default value if no Sobol subsampling: 1st point is the origin of reciprocal unit cell
+            kshift = np.zeros(3) 
+            if nsobol > 0 and _isobol > 0:
+                # get k-point coordinates in reciprocal space from Sobol reduced coordinates
+                kshift = self.bmat@_fshift
+                # module voxel density with complex phase 
+                jSOAS_modulate_voxels(self.uvox, _fshift, self.uvox.shape, global_shape, slabindex[me])
 
             # obtain structure factor from fourier transform
             clock = time.time()
+
             if fftmode == "FFTW":
                 mpiprint ("Applying FFT... ", end="")
                 self.uvox = fft.forward(self.uvox)
-                # normalise
-                self.uvox *= nvox
+                self.uvox *= nvox # normalise
 
             elif fftmode == "SCIPY":
                 mpiprint ("Doing scipy complex FFT along axis 2... ", end="")
@@ -246,7 +266,6 @@ class StructureFactor:
                 mpiprint ("FFT along axis 1... ", end="")
                 self.uvox[:] = scipy.fft.fft(self.uvox, axis=1, norm="backward")
                 
-                # align along first axis for FFT along first axis 
                 mpiprint ("aligning tensor along axis 0... ", end="")
                 uvoxdist.redistribute(-1)
                 self.uvox = uvoxdist.array
@@ -260,10 +279,8 @@ class StructureFactor:
             mpiprint ("Transformed %d voxels in %.3f seconds." % (nvox, clock), end=" ")
             mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
 
-            # define diffraction intensity
+            # after the FFT, the tensor is distributed along a different axis depending on the method
             newshape = self.uvox.shape
-
-            # after the transformation, the tensor is distributed along a different axis depending on the method
             if fftmode == "FFTW":
                 newindexlist = comm.allgather(newshape[1]) # fftw version
             elif fftmode == "SCIPY":
@@ -278,7 +295,7 @@ class StructureFactor:
 
             mpiprint ("Binning... ", end="")
             clock = time.time()
-            jSOAS_spectrum_inplace(_spectrum, _counts, kres, b0, b1, b2, kshift, self.uvox, newshape, global_shape, slabi, slabj, slabk)
+            jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, self.uvox, newshape, global_shape, slabi, slabj, slabk)
             mpiprint ("done.")
             clock = time.time() - clock
 
@@ -289,10 +306,39 @@ class StructureFactor:
             clock_sobol += clock_tot
             mpiprint ("Completed subsampling iteration in %.3f seconds." % clock_tot)
 
+            # threshold intensities and store local diffraction pattern 
+            if dexport: 
+                _npts = -1
+                while (_npts == -1):
+                    # populate k-points and intensities for the diffraction pattern
+                    _npts = jSOAS_diffraction(kvectors, intensities, 0.1*self.readfile.natoms, dkmin, dkmax, 
+                                              self.bmat, kshift, self.uvox, newshape, global_shape, slabi, slabj, slabk)
+
+                    # keep increasing the size of the storage vectors if out-of-bounds access occurrs
+                    if _npts == -1:
+                        _frac += 0.01
+                        print ("Diffraction pattern: out-of-access on rank %d, increasing array size to %.2f%% size of voxel tensor." % (me, _frac))
+                        kvectors = np.zeros((int(_frac*self.uvox.size), 3), dtype=float)
+                        intensities = np.zeros(int(_frac*self.uvox.size), dtype=float)
+                
+                _diffraction_pattern += [np.c_[kvectors[:_npts], intensities[:_npts]]]
+                #print ("Sparsity on rank %d: %.3f%%" % (me, _npts/self.uvox.size*100))
+
         if nsobol > 1:
             mpiprint ("\nFinished subsampling.\n")
             mpiprint ("Completed subsampling in %.3f seconds." % clock_sobol)
-     
+
+        # export sparse diffraction spectrum data
+        if dexport:
+            mpiprint ("Exporting diffraction patterns...", end=" ")
+            _diffraction_pattern = np.vstack(_diffraction_pattern)
+            with open('%s.%d.xyz' % (dexport, me), 'w') as ofile:
+                ofile.write("%d\n" % len(_diffraction_pattern))
+                ofile.write("# kx ky kz intensity\n")
+                np.savetxt(ofile, _diffraction_pattern, fmt="%16.8e %16.8e %16.8e %16.8e")
+            comm.barrier()
+            mpiprint ("done.\n")
+
         # collate results from all threads into one 
         spectrum = np.zeros_like(_spectrum)
         counts = np.zeros_like(_counts)
@@ -303,18 +349,18 @@ class StructureFactor:
         krange = .5*kres + kres*np.arange(len(spectrum))    # bin mid-points
 
         # remove window in k-space due to gaussian smoothing
-        acell = np.copy(self.readfile.cmat) 
-        acell[0] = acell[0]/nx
-        acell[1] = acell[1]/ny
-        acell[2] = acell[2]/nz
-        sigma = .5*np.min(np.linalg.norm(acell, axis=0))
+        sigma = .5*np.min(np.linalg.norm(self.acell, axis=0))
         spectrum *= np.exp(krange*krange*4*np.pi*np.pi*sigma*sigma)
 
         # normalisation: divide by number of kpts per shell
         spectrum[counts>0] *= 1/counts[counts>0]            
 
         self.spectrum = np.c_[krange, spectrum, counts]
-        
+       
+        # fetch position of last occupied bin and cut off spectrum beyond that value
+        lastindex = np.nonzero(counts)[0][-1]
+        self.spectrum = self.spectrum[:lastindex]
+ 
         clock_complete = time.time() - clock_complete
         mpiprint ("Completed entire routine in %.3f seconds." % clock_complete)
         
@@ -322,36 +368,23 @@ class StructureFactor:
         return 0
 
 
-    def SOAS_kernel(self, tri=False):
+    def SOAS_kernel(self, acell, tri=False):
     
-        nx,ny,nz = self.global_shape 
-
         nfine = 10
-        infine = 1./nfine
+        iafine = 1./nfine
 
         if tri:
             nfine += 1
         kernel = np.zeros((nfine,nfine,nfine, 4,4,4))
 
-        # find the unit cell for the voxels and for the fine-mesh subdivision of the voxels
-        # assume rows of acell are the cell vectors
-        asuper = self.readfile.cmat 
-        acell = np.copy(self.readfile.cmat) 
-        acell[0] = asuper[0]/nx
-        acell[1] = asuper[1]/ny
-        acell[2] = asuper[2]/nz
+        # find the unit cell for for fine-mesh subdivision of the voxels
+        afine = acell*iafine
 
-        # inverse voxel cell = reciprocal voxel cell (convention for spectrum: no 2pi) 
-        iacell = np.linalg.inv(acell)
-
-        afine = acell*infine
-        iafine = iacell*nfine
-
+        # chose standard deviation of Gaussian smoothing as half the shortest vertex spacing 
         sigma = .5*np.min(np.linalg.norm(acell, axis=0))
-
-        # construct the kernel
         i2s2 = 1./(2.*sigma*sigma) 
 
+        # construct the kernel
         for ix in range(nfine):
             ixv = ix
             for iy in range(nfine):
@@ -394,12 +427,12 @@ class StructureFactor:
                     ddsum = 1./ddsum
                     kernel[ix,iy,iz, :,:,:] *= ddsum
 
-        return kernel, iacell
+        return kernel
 
 
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell1, acell2, slabindex):
+def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, slabindex):
 
     # faster algorithm exploiting orthonormality of lattice to reciprocal vectors
     nx,ny,nz = global_shape
@@ -408,23 +441,82 @@ def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell
         for j in range(local_shape[1]): 
             for k in range(local_shape[2]):
                 uvox[i,j,k] *= cmath.exp(2j*np.pi*(iv/nx*kshift[0] + j/ny*kshift[1] + k/nz*kshift[2]))
-
-    '''
-    for i in range(local_shape[0]):
-        v0 = (i+slabindex)*acell0
-        for j in range(local_shape[1]): 
-            v1 = j*acell1
-            for k in range(local_shape[2]):
-                v2 = k*acell2
-                rvox = v0+v1+v2
-                uvox[i,j,k] *= cmath.exp(2j*np.pi*(rvox[0]*kshift[0] + rvox[1]*kshift[1] + rvox[2]*kshift[2]))
-    '''
-
     return 0
 
 
+#@jit(nopython=True, fastmath=True)
+#def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell1, acell2, slabindex):
+#    for i in range(local_shape[0]):
+#        v0 = (i+slabindex)*acell0
+#        for j in range(local_shape[1]): 
+#            v1 = j*acell1
+#            for k in range(local_shape[2]):
+#                v2 = k*acell2
+#                rvox = v0+v1+v2
+#                uvox[i,j,k] *= cmath.exp(2j*np.pi*(rvox[0]*kshift[0] + rvox[1]*kshift[1] + rvox[2]*kshift[2]))
+#    return 0
+
+
 @jit(nopython=True, fastmath=True)
-def jSOAS_spectrum_inplace(spectrum, counts, kres, b0, b1, b2, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
+def jSOAS_diffraction(kvectors, intensities, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
+
+    # store diffraction spots in sparse format for the given MPI thread 
+    c = 0
+    for i in range(new_shape[0]):
+        # offset i,j,k depending on how the tensor is distributed
+        iv = i + slabi
+        for j in range(new_shape[1]):
+            jv = j + slabj
+            for k in range(new_shape[2]):
+                kv = k + slabk
+
+                # compute intensity
+                _psi_re = psi_k[i,j,k].real 
+                _psi_im = psi_k[i,j,k].imag
+                _int_k = _psi_re*_psi_re + _psi_im*_psi_im
+
+                # only consider intensities above a given threshold for sparse representation
+                if _int_k < int_threshold:
+                    continue
+
+                # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.
+                if iv >= global_shape[0]/2:
+                    iv -= global_shape[0]
+                if jv >= global_shape[1]/2:
+                    jv -= global_shape[1]
+                if kv >= global_shape[2]/2:
+                    kv -= global_shape[2]
+
+                kx = iv*bmat[0,0] + jv*bmat[1,0] + kv*bmat[2,0] - kshift[0]
+                ky = iv*bmat[0,1] + jv*bmat[1,1] + kv*bmat[2,1] - kshift[1]
+                kz = iv*bmat[0,2] + jv*bmat[1,2] + kv*bmat[2,2] - kshift[2]
+
+                # squared norm of the k vector belonging to this voxel
+                ksq = kx*kx + ky*ky + kz*kz
+    
+                if c >= len(kvectors):
+                    return -1
+
+                # we do not care about the 000 spot
+                if ksq < kmin*kmin:
+                    continue
+
+                if ksq > kmax*kmax:
+                    continue
+
+                kvectors[c,0] = kx 
+                kvectors[c,1] = ky 
+                kvectors[c,2] = kz 
+                intensities[c] = _int_k
+                c += 1
+
+    # return length of vectors containing stored information 
+    return c
+
+
+
+@jit(nopython=True, fastmath=True)
+def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
 
     # bin diffraction intensity over all k-directions
     for i in range(new_shape[0]):
@@ -443,18 +535,19 @@ def jSOAS_spectrum_inplace(spectrum, counts, kres, b0, b1, b2, kshift, psi_k, ne
                 if kv >= global_shape[2]/2:
                     kv -= global_shape[2]
 
-                kx = iv*b0[0]+jv*b1[0]+kv*b2[0] - kshift[0]
-                ky = iv*b0[1]+jv*b1[1]+kv*b2[1] - kshift[1]
-                kz = iv*b0[2]+jv*b1[2]+kv*b2[2] - kshift[2]
+                kx = iv*bmat[0,0] + jv*bmat[1,0] + kv*bmat[2,0] - kshift[0]
+                ky = iv*bmat[0,1] + jv*bmat[1,1] + kv*bmat[2,1] - kshift[1]
+                kz = iv*bmat[0,2] + jv*bmat[1,2] + kv*bmat[2,2] - kshift[2]
 
                 # norm of the k vector belonging to this voxel
                 knorm = math.sqrt(kx*kx + ky*ky + kz*kz)
 
-                # if the input signal is real, we need to double-count all except for the kz=0 value.
+                # compute intensity
                 _psi_re = psi_k[i,j,k].real 
                 _psi_im = psi_k[i,j,k].imag
                 _int_k = _psi_re*_psi_re + _psi_im*_psi_im
 
+                # bin intensity and count
                 spectrum[int(knorm/kres)] += _int_k 
                 counts[int(knorm/kres)] +=  1
     return 0
