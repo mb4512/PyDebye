@@ -450,21 +450,9 @@ def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, slabindex):
     return 0
 
 
-#@jit(nopython=True, fastmath=True)
-#def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, acell0, acell1, acell2, slabindex):
-#    for i in range(local_shape[0]):
-#        v0 = (i+slabindex)*acell0
-#        for j in range(local_shape[1]): 
-#            v1 = j*acell1
-#            for k in range(local_shape[2]):
-#                v2 = k*acell2
-#                rvox = v0+v1+v2
-#                uvox[i,j,k] *= cmath.exp(2j*np.pi*(rvox[0]*kshift[0] + rvox[1]*kshift[1] + rvox[2]*kshift[2]))
-#    return 0
-
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_diffraction(kvectors, intensities, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
+def jSOAS_diffraction(kvectors, intensities, int_threshold, kmin, kmax, bmat, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
 
     # store diffraction spots in sparse format for the given MPI thread 
     c = 0
