@@ -123,11 +123,11 @@ def main():
     parser.add_argument("-eiso", "--eisostrain", type=float, default=0.0,
                         help="DEBUG: Isotropic strain to apply to simulation cell (default: %(default)s)")
     parser.add_argument("-ediff", "--exportdiffraction", default="False",
-                        help="DEBUG: export path of diffraction pattern for FFT mode (default: %(default)s)")
+                        help="ALPHA: export path of diffraction pattern for FFT mode (default: %(default)s)")
     parser.add_argument("-ekmin", "--exportkmin", type=float, default=0.2,
-                        help="DEBUG: minimum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
+                        help="ALPHA: minimum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
     parser.add_argument("-ekmax", "--exportkmax", type=float, default=0.7,
-                        help="DEBUG: maximum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
+                        help="ALPHA: maximum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
 
 
     # export path of final spectrum

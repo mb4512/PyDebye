@@ -178,16 +178,21 @@ class StructureFactor:
         jSOAS_xyz_to_voxel(self.readfile.xyz, self.iacell) # transform
 
         # spatial domain decomposition for atoms, so that voxelisation complexity scales linearly with number of atoms
-        # loop atoms back into periodic box
-        _looped = (self.readfile.xyz[:,0]%global_shape[0])
+        dskin = 3
+        wrapindex = self.readfile.xyz[:,0] % global_shape[0]
+        _bool = (wrapindex >= slabindex[me]-dskin)*(wrapindex <= slabindex[me]+dskin+self.uvox.shape[0])
 
-        # remove atoms that lie outside the local slab region plus a skin of 3 voxels
-        _dskin = 3
-        _bool = (_looped >= slabindex[me]-_dskin)*(_looped <= slabindex[me]+myshape[0]+_dskin)
+        # to make sure PBCs do not cause issues, treat edge cases separately. probably there is a more elegant way
+        if slabindex[me] < dskin:
+            _bool[wrapindex > global_shape[0]-dskin+slabindex[me]] = True
+        if slabindex[me] + self.uvox.shape[0] + dskin > global_shape[0]:
+            _bool[wrapindex + global_shape[0] < slabindex[me]+self.uvox.shape[0]+dskin] = True
+
+        # only leave atoms in this MPI rank that lie within the local slab 
         self.readfile.xyz = self.readfile.xyz[_bool]
 
         mpiprint ("Compiling voxelisation routine... ", end="")
-        jSOAS_voxel_tri(kernel, self.readfile.xyz[:10], self.uvox, global_shape, slabindex[me]) # compile first
+        jSOAS_voxel_tri(kernel, np.random.rand(10,3), self.uvox, global_shape, slabindex[me]) # compile first
         mpiprint ("done.")
 
         # prepare histogram for binning k-points over all k-directions 
@@ -197,7 +202,7 @@ class StructureFactor:
         mpiprint ("Compiling binning routine... ", end="")
         _psi_k = np.ones((10,10,10), dtype=complex)
         kshift = np.zeros(3) 
-        jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, _psi_k, myshape, global_shape, 0, 0, 0) 
+        jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, _psi_k, self.uvox.shape, global_shape, 0, 0, 0) 
         _spectrum[:] = 0.0
         _counts *= 0
         mpiprint ("done.")
@@ -217,6 +222,7 @@ class StructureFactor:
             intensities = np.zeros(int(_frac*self.uvox.size), dtype=float)
             _diffraction_pattern = [] 
 
+        # loop over all Sobol subsampling points, compute and bin diffraction pattern
         clock_sobol = 0
         for _isobol,_fshift in enumerate(fshifts):
             clock_tot = time.time()
@@ -572,8 +578,8 @@ def jSOAS_xyz_to_voxel(xyz, iacell):
 @jit(nopython=True, fastmath=True)
 def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
 
-    nx_global,ny_global,nz_global = global_shape
-    nx,ny,nz = rho.shape # shape of distributed tensor 
+    nx_global,ny_global,nz_global = global_shape # shape of global tensor 
+    nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
     nfine = 10
@@ -620,7 +626,6 @@ def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
                 ly = (jy + ky)%ny_global
                 for kz in range(-1,3):
                     lz = (jz + kz)%nz_global
-
                     rho[lx,ly,lz] += kernel_linint[1+kx,1+ky,1+kz]
 
     return 0
@@ -628,8 +633,8 @@ def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
 @jit(nopython=True, fastmath=True)
 def jSOAS_voxel(kernel, xxyyzz, rho, global_shape, slabindex):
 
-    nx_global,ny_global,nz_global = global_shape
-    nx,ny,nz = rho.shape # shape of distributed tensor 
+    nx_global,ny_global,nz_global = global_shape # shape of global tensor 
+    nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
     nfine = 10
