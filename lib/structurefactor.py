@@ -83,7 +83,7 @@ class StructureFactor:
         return 0
  
 
-    def SOAS_build_structurefactor_fftw(self, nsobol=-1, nres=10, dexport=False, dkmin=0.2, dkmax=0.7):
+    def SOAS_build_structurefactor_fftw(self, nsobol=-1, nres=10, dexport=False, dkmin=0.2, dkmax=0.7, int_threshold=0, dsparsity=0.1):
 
         # catch non-sensical input
         assert nres > 0, "-nr NRESOLUTION, --nresolution: Target number of k-pts per reciprocal space direction must be larger than 0."
@@ -114,6 +114,10 @@ class StructureFactor:
         mpiprint (self.bmat)
         mpiprint ()
 
+        # Estimate of maximum k norm sampled here (not accounting for FFT frequency shift) 
+        self.kmax = np.linalg.norm(global_shape[0]*self.bmat[0] + global_shape[1]*self.bmat[1] + global_shape[2]*self.bmat[2])
+        mpiprint ("Maximum k norm (1/Ang): {}\n".format(self.kmax))
+
         # determine required number of sobol points
         if nsobol == -1:
             mpiprint ("Number of Sobol points to resolve size-broadened peak with a %d^3 k-pt grid: " % nres) 
@@ -142,10 +146,6 @@ class StructureFactor:
         else:
             mpiprint ("No subsampling enabled, using one k-point per reciprocal unit cell.\n")
 
-        # Estimate of maximum k norm sampled here (not accounting for FFT frequency shift) 
-        self.kmax = np.linalg.norm(global_shape[0]*self.bmat[0] + global_shape[1]*self.bmat[1] + global_shape[2]*self.bmat[2])
-        mpiprint ("Maximum k norm: {}\n".format(self.kmax))
-
         # initialise distributed tensor on all cores in slab distribution: 
         # the first axis of the tensor is distributed over all MPI processes 
         if fftmode == "FFTW":
@@ -159,8 +159,7 @@ class StructureFactor:
             self.uvox = uvoxdist.array
 
         # gather the slab thicknesses into one list
-        myshape = self.uvox.shape
-        indexlist = comm.allgather(myshape[0])
+        indexlist = comm.allgather(self.uvox.shape[0])
         mpiprint ("Voxel grid is distributed into slabs along axis 0 of length: {}\n".format(indexlist))
  
         # list of voxel slab indices to be constructed by each thread 
@@ -188,7 +187,7 @@ class StructureFactor:
         if slabindex[me] + self.uvox.shape[0] + dskin > global_shape[0]:
             _bool[wrapindex + global_shape[0] < slabindex[me]+self.uvox.shape[0]+dskin] = True
 
-        # only leave atoms in this MPI rank that lie within the local slab 
+        # only retain atoms in this MPI rank that lie within the local slab plus a skin region 
         self.readfile.xyz = self.readfile.xyz[_bool]
 
         mpiprint ("Compiling voxelisation routine... ", end="")
@@ -202,14 +201,14 @@ class StructureFactor:
         mpiprint ("Compiling binning routine... ", end="")
         _psi_k = np.ones((10,10,10), dtype=complex)
         kshift = np.zeros(3) 
-        jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, _psi_k, self.uvox.shape, global_shape, 0, 0, 0) 
+        jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, _psi_k, global_shape, 0, 0, 0) 
         _spectrum[:] = 0.0
         _counts *= 0
         mpiprint ("done.")
         
         if nsobol > 0:
             mpiprint ("Compiling complex modulation routine... ", end="")
-            jSOAS_modulate_voxels(self.uvox, kshift, self.uvox.shape, global_shape, slabindex[me])
+            jSOAS_modulate_voxels(self.uvox, kshift, global_shape, slabindex[me])
             mpiprint ("done.")
 
         clock_startup = time.time() - clock_startup
@@ -255,7 +254,7 @@ class StructureFactor:
                 # get k-point coordinates in reciprocal space from Sobol reduced coordinates
                 kshift = self.bmat@_fshift
                 # module voxel density with complex phase 
-                jSOAS_modulate_voxels(self.uvox, _fshift, self.uvox.shape, global_shape, slabindex[me])
+                jSOAS_modulate_voxels(self.uvox, _fshift, global_shape, slabindex[me])
 
             # obtain structure factor from fourier transform
             clock = time.time()
@@ -264,6 +263,11 @@ class StructureFactor:
                 mpiprint ("Applying FFT... ", end="")
                 self.uvox = fft.forward(self.uvox)
                 self.uvox *= nvox # normalise
+
+                # after the FFT, the tensor is distributed along axis=1 in FFTW 
+                newindexlist = comm.allgather(self.uvox.shape[1])
+                newslabindex = np.r_[0, np.cumsum(newindexlist)]
+                slabi,slabj,slabk = 0,newslabindex[me],0  # distributed slab index offsets
 
             elif fftmode == "SCIPY":
                 mpiprint ("Doing scipy complex FFT along axis 2... ", end="")
@@ -278,30 +282,22 @@ class StructureFactor:
 
                 mpiprint ("FFT along axis 0... ", end="")
                 self.uvox[:] = scipy.fft.fft(self.uvox, axis=0, norm="backward")
-            
+                
+                # after the FFT, the tensor is distributed along axis=2 in SCIPY 
+                newindexlist = comm.allgather(self.uvox.shape[2]) # scipy version
+                newslabindex = np.r_[0, np.cumsum(newindexlist)]
+                slabi,slabj,slabk = 0,0,newslabindex[me] # distributed slab index offsets
+
             mpiprint ("done.")
 
             clock = time.time() - clock
             mpiprint ("Transformed %d voxels in %.3f seconds." % (nvox, clock), end=" ")
             mpiprint ("Performance: %.3f ns/vox.\n" % (1e9*clock/nvox))
 
-            # after the FFT, the tensor is distributed along a different axis depending on the method
-            newshape = self.uvox.shape
-            if fftmode == "FFTW":
-                newindexlist = comm.allgather(newshape[1]) # fftw version
-            elif fftmode == "SCIPY":
-                newindexlist = comm.allgather(newshape[2]) # scipy version
-
-            newslabindex = np.r_[0, np.cumsum(newindexlist)]
-
-            if fftmode == "FFTW":
-                slabi,slabj,slabk = 0,newslabindex[me],0 
-            elif fftmode == "SCIPY":
-                slabi,slabj,slabk = 0,0,newslabindex[me]
-
-            mpiprint ("Binning... ", end="")
+            # bin the computed diffraction pattern into a line-profile
             clock = time.time()
-            jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, self.uvox, newshape, global_shape, slabi, slabj, slabk)
+            mpiprint ("Binning... ", end="")
+            jSOAS_spectrum_inplace(_spectrum, _counts, kres, self.bmat, kshift, self.uvox, global_shape, slabi, slabj, slabk)
             mpiprint ("done.")
             clock = time.time() - clock
 
@@ -312,13 +308,23 @@ class StructureFactor:
             clock_sobol += clock_tot
             mpiprint ("Completed subsampling iteration in %.3f seconds." % clock_tot)
 
-            # threshold intensities and store local diffraction pattern 
+            # if no threshold is given, estimate it for a given target sparsity from the first sobol iteration
+            if dexport and int_threshold == 0 and _isobol == 0:
+
+                # collate counts and intensities from all threads to all
+                krange, spectrum, counts = self.reduce_spectrum(_spectrum, _counts, kres, self.acell)
+
+                # from this spectrum, determine approximate intensity threshold for target sparsity 
+                int_threshold = self.determine_threshold(dsparsity, dkmin, dkmax, krange, spectrum, counts)
+                mpiprint ("\nDetermined approximate intensity threshold of {} for target sparsity of {}%%.\n".format(int_threshold, 100*dsparsity))
+            
+            # threshold intensities and store local diffraction pattern
             if dexport: 
                 _npts = -1
                 while (_npts == -1):
                     # populate k-points and intensities for the diffraction pattern
-                    _npts = jSOAS_diffraction(kvectors, intensities, 0.1*self.readfile.natoms, dkmin, dkmax, 
-                                              self.bmat, kshift, self.uvox, newshape, global_shape, slabi, slabj, slabk)
+                    _npts = jSOAS_diffraction(kvectors, intensities, int_threshold, dkmin, dkmax, 
+                                              self.bmat, kshift, self.uvox, global_shape, slabi, slabj, slabk)
 
                     # keep increasing the size of the storage vectors if out-of-bounds access occurrs
                     if _npts == -1:
@@ -345,33 +351,78 @@ class StructureFactor:
             comm.barrier()
             mpiprint ("done.\n")
 
+        # collate counts and intensities from all threads to all
+        krange, spectrum, counts = self.reduce_spectrum(_spectrum, _counts, kres, self.acell)
+ 
+        # construct spectrum for exporting
+        self.spectrum = np.c_[krange, spectrum, counts]
+
+        # fetch position of last occupied bin and cut off spectrum beyond that value
+        lastindex = np.nonzero(counts)[0][-1]
+        self.spectrum = self.spectrum[:lastindex]
+
+        # report sparsity of diffraction profile 
+        if dexport:
+            _size = _diffraction_pattern.size
+            totsize = np.sum(comm.allgather(_size))
+            _bool = (krange>=dkmin)*(krange<=dkmax)
+            fraction = totsize/np.sum(counts[_bool])
+            mpiprint ("Sparsity of stored diffraction pattern for %.3f<=|k|<%.3f: %.3f%%" % (dkmin, dkmax, 100*fraction))
+
+        # report intensity threshold for hypothetical diffraction pattern export 
+        int_threshold = self.determine_threshold(dsparsity, dkmin, dkmax, krange, spectrum, counts)
+        mpiprint ("\nThe intensity threshold for storing a 3D diffraction pattern with sparsity of {}%% is {}.\n".format(100.*dsparsity, int_threshold))
+
+        clock_complete = time.time() - clock_complete
+        mpiprint ("Completed entire routine in %.3f seconds." % clock_complete)
+        
+        comm.barrier()
+        return 0
+
+
+    def reduce_spectrum(self, _spectrum, _counts, kres, acell):
+
         # collate results from all threads into one 
         spectrum = np.zeros_like(_spectrum)
         counts = np.zeros_like(_counts)
         comm.Allreduce([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], op=MPI.SUM)
         comm.Allreduce([_counts, MPI.INT], [counts, MPI.INT], op=MPI.SUM)
 
-        # define diffraction spectrum
-        krange = .5*kres + kres*np.arange(len(spectrum))    # bin mid-points
-
         # remove window in k-space due to gaussian smoothing
-        sigma = .5*np.min(np.linalg.norm(self.acell, axis=0))
+        krange = .5*kres + kres*np.arange(len(spectrum))    # wavenumber bin mid-points
+        sigma = .5*np.min(np.linalg.norm(acell, axis=0))
         spectrum *= np.exp(krange*krange*4*np.pi*np.pi*sigma*sigma)
 
         # normalisation: divide by number of kpts per shell
         spectrum[counts>0] *= 1/counts[counts>0]            
 
-        self.spectrum = np.c_[krange, spectrum, counts]
-       
-        # fetch position of last occupied bin and cut off spectrum beyond that value
-        lastindex = np.nonzero(counts)[0][-1]
-        self.spectrum = self.spectrum[:lastindex]
- 
-        clock_complete = time.time() - clock_complete
-        mpiprint ("Completed entire routine in %.3f seconds." % clock_complete)
+        return krange, spectrum, counts
+
+    def determine_threshold(self, sparsity, dkmin, dkmax, krange, spectrum, counts):
         
-        comm.barrier()
-        return 0
+        _bool = (krange>=dkmin)*(krange<=dkmax)
+        fspec   = spectrum[_bool]
+        fcounts = counts[_bool]
+
+        # bin counts over intensities
+        intmax = np.max(fspec)
+        ires = intmax/1000
+        irange = .5*ires + np.arange(0, intmax+ires, ires)      # intensity bin mid-points
+        histo = np.zeros(len(irange))                    
+    
+        # bin intensity and count
+        for _ii in range(len(fspec)):
+            histo[int(fspec[_ii]/ires)] += fcounts[_ii]
+
+        # normalise to obtain frequency distribution of counts over intensity
+        histo *= 1/(ires*np.sum(histo))
+
+        # determine cumulative function and find threshold intensity for which target sparsity is met 
+        histocumulative = ires * np.r_[0, np.cumsum(histo)]
+        _ix = np.argwhere(histocumulative > 1.-sparsity)[0,0]
+        int_threshold = irange[_ix]
+
+        return int_threshold
 
 
     def SOAS_kernel(self, acell, tri=False):
@@ -438,7 +489,10 @@ class StructureFactor:
 
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, slabindex):
+def jSOAS_modulate_voxels(uvox, kshift, global_shape, slabindex):
+
+    # fetch shape of the slab on this MPI process
+    local_shape = uvox.shape
 
     # faster algorithm exploiting orthonormality of lattice to reciprocal vectors
     nx,ny,nz = global_shape
@@ -452,16 +506,19 @@ def jSOAS_modulate_voxels(uvox, kshift, local_shape, global_shape, slabindex):
 
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_diffraction(kvectors, intensities, int_threshold, kmin, kmax, bmat, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
+def jSOAS_diffraction(kvectors, intensities, int_threshold, kmin, kmax, bmat, kshift, psi_k, global_shape, slabi, slabj, slabk):
 
+    # fetch shape of the slab on this MPI process
+    local_shape = psi_k.shape
+    
     # store diffraction spots in sparse format for the given MPI thread 
     c = 0
-    for i in range(new_shape[0]):
+    for i in range(local_shape[0]):
         # offset i,j,k depending on how the tensor is distributed
         iv = i + slabi
-        for j in range(new_shape[1]):
+        for j in range(local_shape[1]):
             jv = j + slabj
-            for k in range(new_shape[2]):
+            for k in range(local_shape[2]):
                 kv = k + slabk
 
                 # compute intensity
@@ -510,15 +567,18 @@ def jSOAS_diffraction(kvectors, intensities, int_threshold, kmin, kmax, bmat, ks
 
 
 @jit(nopython=True, fastmath=True)
-def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, new_shape, global_shape, slabi, slabj, slabk):
+def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, global_shape, slabi, slabj, slabk):
+
+    # fetch shape of the slab on this MPI process
+    local_shape = psi_k.shape
 
     # bin diffraction intensity over all k-directions
-    for i in range(new_shape[0]):
+    for i in range(local_shape[0]):
         # offset i,j,k depending on how the tensor is distributed
         iv = i + slabi
-        for j in range(new_shape[1]):
+        for j in range(local_shape[1]):
             jv = j + slabj
-            for k in range(new_shape[2]):
+            for k in range(local_shape[2]):
                 kv = k + slabk
 
                 # in the other axes, frequencies are ordered as {0, 1, 2, ..., Nx/2, -Nx/2 + 1, ..., -2, -1}.

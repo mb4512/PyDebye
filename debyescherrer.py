@@ -128,7 +128,10 @@ def main():
                         help="ALPHA: minimum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
     parser.add_argument("-ekmax", "--exportkmax", type=float, default=0.7,
                         help="ALPHA: maximum k-norm of diffraction pattern to export in 1/Angstrom (default: %(default)s)")
-
+    parser.add_argument("-ith", "--intthreshold", type=float, default=0,
+                        help="ALPHA: minimum intensity threshold for export of diffraction pattern (automatic determination for 0) (default: %(default)s)")
+    parser.add_argument("-dsp", "--diffractionsparsity", type=float, default=0.1,
+                        help="ALPHA: target fraction of diffraction prattern to export, used for determination of minimum intensity threshold (default: %(default)s)")
 
     # export path of final spectrum
     parser.add_argument("-sx", "--specexport", default="spectrum.dat", 
@@ -157,7 +160,8 @@ def main():
     if args.method == "fft":
         # fft based method
         sfac = StructureFactor(filedat, dx=args.voxelspacing, fftmode=args.fftmode) 
-        sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution, dexport=args.exportdiffraction, dkmin=args.exportkmin, dkmax=args.exportkmax)
+        sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution, dexport=args.exportdiffraction, 
+                                             dkmin=args.exportkmin, dkmax=args.exportkmax, int_threshold=args.intthreshold, dsparsity=args.diffractionsparsity)
         spectrum = sfac.spectrum
 
     elif args.method == "real":
