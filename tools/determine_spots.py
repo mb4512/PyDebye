@@ -117,7 +117,7 @@ def main ():
         for _voxel in cluster:
             ijkmap[tuple(_voxel)] = ci
 
-    fpath = 'spots2.xyz'
+    fpath = 'spots.xyz'
     print ("\nExporting into file %s..." % fpath, end='')
     sys.stdout.flush()
 

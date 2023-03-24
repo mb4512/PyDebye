@@ -5,7 +5,7 @@ import glob, os
 def main ():
 
     prefix = "svm"
-    suffix = "spec"
+    suffix = "dat"
     refdir = "reference_output"
     gendir = "generated_output"
 
