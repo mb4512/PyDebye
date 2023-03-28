@@ -432,8 +432,7 @@ class StructureFactor:
 
     def SOAS_kernel(self, acell, tri=False):
     
-        #nfine = 10
-        nfine = 30
+        nfine = 10
         iafine = 1./nfine
 
         if tri:
@@ -636,8 +635,7 @@ def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
     nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
-    #nfine = 10
-    nfine = 30
+    nfine = 10
 
     kernel_linint = np.zeros((4,4,4), dtype=float) 
 
@@ -692,8 +690,7 @@ def jSOAS_voxel(kernel, xxyyzz, rho, global_shape, slabindex):
     nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
-    #nfine = 10
-    nfine = 30
+    nfine = 10
 
     # loop through each atom    
     rho *= 0        
