@@ -118,6 +118,8 @@ def main():
                         help="Target number of k-pts per reciprocal space direction for automatic resolution of size broadening (default: %(default)s)")
 
     # debug/testing
+    parser.add_argument("-nbcc", "--nperfectbcc", type=int, default=0,
+                        help="DEBUG: Create a perfect bcc crystal cude with side length of nbcc uniut cells (default: %(default)s)")
     parser.add_argument("-ex", "--exxstrain", type=float, default=0.0,
                         help="DEBUG: Strain to apply to simulation cell in x-direction (default: %(default)s)")
     parser.add_argument("-eiso", "--eisostrain", type=float, default=0.0,
@@ -155,7 +157,7 @@ def main():
 
     # build or import the histogram
     filedat = ReadFile(fpath, filetype=args.filetype)
-    filedat.load(shuffle = ~args.ordered, exx=args.exxstrain, eiso=args.eisostrain)
+    filedat.load(shuffle = ~args.ordered, exx=args.exxstrain, eiso=args.eisostrain, nbcc=args.nperfectbcc)
 
     if args.method == "fft":
         # fft based method

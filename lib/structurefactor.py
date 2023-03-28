@@ -420,14 +420,20 @@ class StructureFactor:
         # determine cumulative function and find threshold intensity for which target sparsity is met 
         histocumulative = ires * np.r_[0, np.cumsum(histo)]
         _ix = np.argwhere(histocumulative > 1.-sparsity)[0,0]
-        int_threshold = irange[_ix]
+
+        if _ix < len(irange):
+            int_threshold = irange[_ix]
+        else:
+            # guess by linear interpolation
+            int_threshold = (histocumulative[-2]-(1-sparsity))*(irange[-1]-irange[-2])/(histocumulative[-2]-1) + irange[-2]      
 
         return int_threshold
 
 
     def SOAS_kernel(self, acell, tri=False):
     
-        nfine = 10
+        #nfine = 10
+        nfine = 30
         iafine = 1./nfine
 
         if tri:
@@ -630,7 +636,8 @@ def jSOAS_voxel_tri(kernel, xxyyzz, rho, global_shape, slabindex):
     nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
-    nfine = 10
+    #nfine = 10
+    nfine = 30
 
     kernel_linint = np.zeros((4,4,4), dtype=float) 
 
@@ -685,7 +692,8 @@ def jSOAS_voxel(kernel, xxyyzz, rho, global_shape, slabindex):
     nx,ny,nz = rho.shape                         # shape of distributed tensor 
  
     natoms = len(xxyyzz)
-    nfine = 10
+    #nfine = 10
+    nfine = 30
 
     # loop through each atom    
     rho *= 0        

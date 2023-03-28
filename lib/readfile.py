@@ -33,7 +33,7 @@ class ReadFile:
         self.fpath = fpath
         self.filetype = filetype
         
-    def load(self, shuffle=False, exx=0.0, eiso=0.0):
+    def load(self, shuffle=False, exx=0.0, eiso=0.0, nbcc=0):
 
         # histogram files are handled specially
         if self.filetype == "hist":
@@ -61,7 +61,7 @@ class ReadFile:
 
 
         # file is read in by one thread
-        if (me == 0): 
+        if (me == 0) and nbcc == 0: 
             if self.filetype == "data":
                 self.xyz, self.cell, self.cmat = self.read_data(self.fpath)
             elif self.filetype == "dump":
@@ -90,6 +90,16 @@ class ReadFile:
         self.cmat   = comm.bcast(self.cmat, root=0)
         self.natoms = comm.bcast(self.natoms, root=0)
         self.ortho  = comm.bcast(self.ortho, root=0)
+
+        # for debugging: possibility to add uniaxial or isotropic strains
+        if nbcc > 0:
+            mpiprint ("Constructing a bcc crystal of %d^3 unit cells, consisting of %d atoms in total." % (nbcc, 2*nbcc**3))
+            a0 = 3.1652
+            x = a0*np.arange(nbcc)
+            self.xyz = np.vstack(np.meshgrid(x,x,x)).reshape(3,-1).T
+            self.xyz = np.r_[self.xyz, self.xyz + a0*.5*np.r_[1,1,1]]
+            self.cmat = nbcc*a0*np.identity(3)
+            self.natoms = len(self.xyz)
 
         # for debugging: possibility to add uniaxial or isotropic strains
         if np.abs(exx) > 0.0:
