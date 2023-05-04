@@ -173,23 +173,23 @@ def main():
         else:
             doskip = False
 
-            cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip, fuzzy=args.fuzzygrain, gsim=args.grainsim)
-            cspec.build_histogram(dr=args.dr)
+        cspec = ComputeSpectrum(filedat, rpartition=args.rpartition, pbc=args.pbc, rcut=args.rcut, skip=doskip, fuzzy=args.fuzzygrain, gsim=args.grainsim)
+        cspec.build_histogram(dr=args.dr)
 
-            if args.filetype != "hist":
-                if (me == 0):
-                    print ("\nExporting histogram to file %s" % args.histexport)
-                    # write additional parameters needed for computing the spectrum to header
-                    natoms = cspec.readfile.natoms
-                    hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
+        if args.filetype != "hist":
+            if (me == 0):
+                print ("\nExporting histogram to file %s" % args.histexport)
+                # write additional parameters needed for computing the spectrum to header
+                natoms = cspec.readfile.natoms
+                hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
 
-                    if args.grainsim:
-                        np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)
-                    else:
-                        np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
-                    mpiprint ()
+                if args.grainsim:
+                    np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)
+                else:
+                    np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%d"), header=hheader)
+                mpiprint ()
 
-            spectrum = cspec.build_debyescherrer(args.smin, args.smax, args.spoints, damp=args.infdamping, ccorrection=args.continuumcorrection, nrho=cspec.nrho)
+        spectrum = cspec.build_debyescherrer(args.smin, args.smax, args.spoints, damp=args.infdamping, ccorrection=args.continuumcorrection, nrho=cspec.nrho)
 
 
     if (me == 0):
