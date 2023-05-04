@@ -151,11 +151,9 @@ class ReadFile:
                 a = np.array([xhi - xlo, 0., 0.])
                 b = np.array([xy,yhi - ylo, 0.])
                 c = np.array([xz,yz,zhi-zlo])
-                L = np.array([a,b,c], dtype=float)
-
-                _cmat = L 
+                _cmat = np.array([a,b,c], dtype=float)
                 _cell = np.array([[xlb,xhb], [ylb,yhb], [zlo,zhi]], dtype=float)
-
+                self.ortho = False
             else:
                 # Orthogonal case 
                 xlo,xhi = np.array(_dfile.readline().split(), dtype=float)
@@ -166,18 +164,44 @@ class ReadFile:
                 a = np.array([xhi - xlo, 0., 0.])
                 b = np.array([0.,yhi - ylo, 0.])
                 c = np.array([0.,0.,zhi-zlo])
-                L = np.array([a,b,c], dtype=float)
-
-                _cmat = L 
+                _cmat = np.array([a,b,c], dtype=float)
                 _cell = np.array([[xlo,xhi], [ylo,yhi], [zlo,zhi]], dtype=float)
 
+            # determine in which columns the atomic coordinates are stored 
+            colstring = _dfile.readline()
+            colstring = colstring.split()[2:] # first two entries typically are 'ITEM:' and 'ATOMS'
+            
+            reduced = False
+            try:
+                ix = colstring.index('x') 
+                iy = colstring.index('y') 
+                iz = colstring.index('z') 
+            except:
+                try:
+                    ix = colstring.index('xs')
+                    iy = colstring.index('ys')
+                    iz = colstring.index('zs')
+                    reduced = True
+                except:
+                    raise RuntimeError("Could not find coordinates 'x', 'y', 'z' or reduced coordinates 'xs', 'ys', 'zs' in the dump file!") 
+            
             # read in atomic coordinates
+            ixyz = np.array([ix,iy,iz])
+            if reduced:
+                _xyz = [np.array([float(f) for f in _dfile.readline().rstrip("\n").split(" ")])[ixyz]@_cmat for i in range(natoms)]
+                _xyz = np.array(_xyz, dtype=float)
+            else:
+                _xyz = [np.array(_dfile.readline().rstrip("\n").split(" "))[ixyz] for i in range(natoms)]
+                _xyz = np.array(_xyz, dtype=float)
+
+            '''
             if 'xs ys zs' in _dfile.readline():
                 _xyz = [np.array([float(f) for f in _dfile.readline().rstrip("\n").split(" ")[2:5]])@L for i in range(natoms)]
                 _xyz = np.array(_xyz, dtype=float)
             else:
                 _xyz = [_dfile.readline().rstrip("\n").split(" ")[2:5] for i in range(natoms)]
                 _xyz = np.array(_xyz, dtype=float)
+            '''
 
         return _xyz, _cell, _cmat
 
