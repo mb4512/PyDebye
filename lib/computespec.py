@@ -417,7 +417,9 @@ class ComputeSpectrum:
 
         # consolidate the binlists from each thread
         _clock = time.time()
-        if self.gsim:
+        if mode == 'serial':
+            _bins = self.binlist.copy()
+        elif self.gsim:
             _bins = np.zeros(self.nbin, dtype=float)
             comm.Allreduce([self.binlist, MPI.DOUBLE], [_bins, MPI.DOUBLE], op=MPI.SUM)
         else:
@@ -513,7 +515,10 @@ class ComputeSpectrum:
             spectrum = None
         comm.barrier()
 
-        comm.Gatherv(sendbuf=_spectrum, recvbuf=(spectrum, sendcounts), root=0)
+        if mode == 'serial':
+            spectrum = _spectrum
+        else:
+            comm.Gatherv(sendbuf=_spectrum, recvbuf=(spectrum, sendcounts), root=0)
 
         if (me == 0):
             #spectrum = natoms + 2.*spectrum

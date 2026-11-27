@@ -1,6 +1,7 @@
 import sys, time, math, cmath
 import numpy as np
-from numba import jit
+from numba import jit, types
+from numba.extending import intrinsic
 
 from lib.distarray import DistributedTensor
 
@@ -12,7 +13,10 @@ try:
     from mpi4py_fft import PFFT, newDistArray, DistArray
     IMPORTED = "successful"
 except ImportError:
-    IMPORTED = ImportError("FFTW mode was set but could not load mpi4py_fft library. Is it installed?")
+    IMPORTED = ImportError(
+        "FFTW backend unavailable: install FFTW and mpi4py-fft (mpi4py_fft), "
+        "or select the SciPy backend with -fm SCIPY."
+    )
 
 # template to replace MPI functionality for single threaded use
 class MPI_to_serial():
@@ -20,6 +24,8 @@ class MPI_to_serial():
         return args[0]
     def barrier(self):
         return 0
+    def allgather(self, value):
+        return [value]
 
 # try running in parallel, otherwise single thread
 try:
@@ -99,7 +105,7 @@ class StructureFactor:
         global_shape[global_shape%2==1] += 1 # set even voxel dimensions (easier fft freq handling)
 
         self.global_shape = global_shape 
-        nvox = np.product(global_shape)
+        nvox = np.prod(global_shape)
         self.dxres = cellnorms/global_shape
 
         mpiprint ("Spacing along cell vectors in Angstrom:", self.dxres)
@@ -385,8 +391,12 @@ class StructureFactor:
         # collate results from all threads into one 
         spectrum = np.zeros_like(_spectrum)
         counts = np.zeros_like(_counts)
-        comm.Allreduce([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], op=MPI.SUM)
-        comm.Allreduce([_counts, MPI.INT], [counts, MPI.INT], op=MPI.SUM)
+        if mode == 'serial':
+            spectrum[:] = _spectrum
+            counts[:] = _counts
+        else:
+            comm.Allreduce([_spectrum, MPI.DOUBLE], [spectrum, MPI.DOUBLE], op=MPI.SUM)
+            comm.Allreduce([_counts, MPI.INT], [counts, MPI.INT], op=MPI.SUM)
 
         # remove window in k-space due to gaussian smoothing
         krange = .5*kres + kres*np.arange(len(spectrum))    # wavenumber bin mid-points
@@ -571,11 +581,23 @@ def jSOAS_diffraction(kvectors, intensities, int_threshold, kmin, kmax, bmat, ks
 
 
 
-@jit(nopython=True, fastmath=True)
+@intrinsic
+def _fma64(typingctx, x, y, z):
+    """One correctly rounded binary64 multiply-add, independent of fastmath."""
+    def codegen(context, builder, signature, args):
+        return builder.fma(*args)
+    return types.float64(types.float64, types.float64, types.float64), codegen
+
+
+# Keep fastmath off in this kernel: reassociation, contraction of the final
+# addition, or rewriting the reciprocal multiplication changes boundary bins.
+# Numba's fastmath pass also marks operations emitted by inlined intrinsics.
+@jit(nopython=True, fastmath=False)
 def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, global_shape, slabi, slabj, slabk):
 
     # fetch shape of the slab on this MPI process
     local_shape = psi_k.shape
+    reciprocal_width = 1.0 / kres
 
     # bin diffraction intensity over all k-directions
     for i in range(local_shape[0]):
@@ -598,8 +620,11 @@ def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, global_s
                 ky = iv*bmat[0,1] + jv*bmat[1,1] + kv*bmat[2,1] - kshift[1]
                 kz = iv*bmat[0,2] + jv*bmat[1,2] + kv*bmat[2,2] - kshift[2]
 
-                # norm of the k vector belonging to this voxel
-                knorm = math.sqrt(kx*kx + ky*ky + kz*kz)
+                # Reference-compatible binary64 order; see tests/REFERENCE_DIAGNOSIS.md.
+                # Only x*x + rounded(y*y) is fused. Round z*z separately, then
+                # add, sqrt, and multiply by the precomputed reciprocal width.
+                ksquared = _fma64(kx, kx, ky*ky) + kz*kz
+                shell = int(math.sqrt(ksquared) * reciprocal_width)
 
                 # compute intensity
                 _psi_re = psi_k[i,j,k].real 
@@ -607,8 +632,8 @@ def jSOAS_spectrum_inplace(spectrum, counts, kres, bmat, kshift, psi_k, global_s
                 _int_k = _psi_re*_psi_re + _psi_im*_psi_im
 
                 # bin intensity and count
-                spectrum[int(knorm/kres)] += _int_k 
-                counts[int(knorm/kres)] +=  1
+                spectrum[shell] += _int_k
+                counts[shell] += 1
     return 0
 
 @jit(nopython=True, fastmath=True)

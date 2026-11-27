@@ -161,7 +161,10 @@ def main():
 
     if args.method == "fft":
         # fft based method
-        sfac = StructureFactor(filedat, dx=args.voxelspacing, fftmode=args.fftmode) 
+        try:
+            sfac = StructureFactor(filedat, dx=args.voxelspacing, fftmode=args.fftmode)
+        except ImportError as exc:
+            parser.error(str(exc))
         sfac.SOAS_build_structurefactor_fftw(nsobol=args.nsobol, nres=args.nresolution, dexport=args.exportdiffraction, 
                                              dkmin=args.exportkmin, dkmax=args.exportkmax, int_threshold=args.intthreshold, dsparsity=args.diffractionsparsity)
         spectrum = sfac.spectrum
@@ -181,7 +184,7 @@ def main():
                 print ("\nExporting histogram to file %s" % args.histexport)
                 # write additional parameters needed for computing the spectrum to header
                 natoms = cspec.readfile.natoms
-                hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.product(cspec.readfile.box))
+                hheader = "rcut %f\nnatoms %d\nnrho %f" % (cspec.rcut, natoms, natoms/np.prod(cspec.readfile.box))
 
                 if args.grainsim:
                     np.savetxt(args.histexport, np.c_[cspec.ri, cspec.binlist], fmt=("%f", "%f"), header=hheader)

@@ -9,3 +9,10 @@ __pycache__/
 *.nbi
 *.dat
 *.sh
+.pytest_cache/
+.venv/
+# The local virtual environment was created in the repository root.
+/bin/
+/include/
+/lib/python*/
+/pyvenv.cfg
