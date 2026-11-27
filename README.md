@@ -70,6 +70,12 @@ mpirun -n X python3 debyescherrer.py histogram.dat -ft hist -damp -ccor -spts 10
 ```
 
 
+## Tests
+
+Run `python -m pytest -v -ra` for the small CPU tests. See
+[tests/README.md](tests/README.md) for dependencies, analytical expectations, and
+the optional one/four-rank SciPy and FFTW reference regressions.
+
 ## To be implemented
 
 Currently only completely free boundaries or 3D periodic boundaries are supported, mixed boundaries are to be implemented. N*log(N) scaling Structurefactor methods was implemented, but requires documentation,

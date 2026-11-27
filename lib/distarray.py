@@ -1,9 +1,12 @@
 import numpy as np
-from mpi4py import MPI
+try:
+    from mpi4py import MPI
+except (ImportError, RuntimeError):
+    MPI = None
 
-comm = MPI.COMM_WORLD
-me = comm.Get_rank()
-nprocs = comm.Get_size()
+comm = MPI.COMM_WORLD if MPI is not None else None
+me = comm.Get_rank() if comm is not None else 0
+nprocs = comm.Get_size() if comm is not None else 1
 
 
 class DistributedTensor:
@@ -71,7 +74,7 @@ class DistributedTensor:
             self.array = np.empty(self.local_shape, dtype=numpytype)
 
         # gather slab thicknesses into one list for easy access
-        self.indexlist = comm.allgather(self.array.shape[distaxis])
+        self.indexlist = comm.allgather(self.array.shape[distaxis]) if comm is not None else [self.array.shape[distaxis]]
 
 
     def redistribute(self, new_distaxis, slabwidths=None):
@@ -107,11 +110,19 @@ class DistributedTensor:
         # plan out new slab widths and global indices spanning the slabs along the distribution axis 
         nspans, nwidths = self._plan_shape(slabwidths, new_distaxis)
 
+        # A single process already owns the entire tensor; no data must move.
+        if nprocs == 1:
+            self.distaxis = new_distaxis
+            self.slabwidths = nwidths
+            self.nspans = nspans
+            self.nwidths = nwidths
+            return 0
+
         # initialise receive buffer
         new_local_shape = np.copy(self.global_shape)
         new_local_shape[new_distaxis] = nwidths[me]
 
-        nrecv = np.product(new_local_shape)
+        nrecv = np.prod(new_local_shape)
         recv = np.empty(nrecv, dtype=self.array.dtype)
         reqarray = [0]*nprocs
 
@@ -130,7 +141,7 @@ class DistributedTensor:
             send_shapes = np.r_[[np.copy(self.global_shape) for pi in range(nprocs)]]
             send_shapes[:,self.distaxis] = self.nwidths
             send_shapes[:,new_distaxis]  = nwidths[pi]
-            nsend = np.product(send_shapes, axis=1)
+            nsend = np.prod(send_shapes, axis=1)
 
             # nonblocking gather
             # could be faster if we had a contiguous 1D view of the multidimensional slice without copying (how??)
